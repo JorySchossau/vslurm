@@ -1,0 +1,15 @@
+#!/bin/bash --login
+
+#SBATCH --job-name=tpotpipeline
+#SBATCH --time=03:55:00
+#SBATCH --ntasks=1
+#SBATCH --constraint=[v100|v100s|a100|h200]
+#SBATCH --cpus-per-task=1
+#SBATCH --mem-per-cpu=32G
+#SBATCH --output=slurmout/%x-%j.out
+
+echo "beginning run..."
+date
+sleep 5
+echo "ran okay"
+date
