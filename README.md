@@ -178,9 +178,12 @@ satisfied. Two real-SLURM forms are unsupported and their group is dropped
 at submit, so the job runs **immediately** rather than waiting:
 `singleton`, and the optional/any-of `?` separator (`afterok:1?afterany:2`,
 including a trailing `?` on an id). Port such scripts to explicit id
-chains via `--parsable`. Unlike real SLURM, an `afterok` job whose
-dependency failed (not completed) stays PENDING forever instead of being
-cancelled — `scancel` it yourself.
+chains via `--parsable`. Like real SLURM (its default
+`kill_invalid_depend` path), a dependency that can never be satisfied —
+an `afterok` job whose dependency terminated not-completed (FAILED,
+CANCELLED, TIMEOUT), or an `afternotok` job whose dependency COMPLETED —
+cancels the dependent job: it leaves the queue as CANCELLED and never
+runs.
 
 ## The other tools, precisely
 
@@ -307,6 +310,12 @@ arrays (files, env, squeue filters, master deps, element deps, element
 cancel, `%N` limit), cancellation, the CPU-budget cap and the
 `vsched --cpus` override, srun run/exit-code/files/cancel, and sacct
 field selection plus `-j`/`-s` filtering.
+
+`bash tests/depend.sh` exercises dependency semantics in isolation: an
+`afterok` job that runs after its dependency succeeds, and dependent jobs
+that are CANCELLED when their dependency can never be satisfied — both
+directions (`afterok` on a FAILED job, `afternotok` on a COMPLETED one),
+matching real SLURM's `kill_invalid_depend` behavior.
 
 `bash tests/install.sh` installs to a temp `PREFIX`, puts the binaries on
 `PATH` with `VSLURM_JOBS` unset, and verifies installed usage from
