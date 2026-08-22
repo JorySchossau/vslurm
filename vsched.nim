@@ -12,7 +12,7 @@ const
   cancelGraceSeconds = 5
 
 type
-  DepResult = enum depSatisfied, depWaiting, depUnresolvable
+  DepResult = enum depSatisfied, depWaiting, depUnresolvable, depFailed
 
 proc countCPUs(): int =
   let n = posix.sysconf(posix.SC_NPROCESSORS_ONLN)
@@ -119,8 +119,12 @@ proc depGroupState(j: Job; group: string; jobs: seq[Job]; maxId: int): DepResult
     let s = r.job.state
     var ok = false
     case t
-    of "afterok": ok = s == stCompleted
-    of "afternotok": ok = r.job.isTerminal and s != stCompleted
+    of "afterok":
+      if r.job.isTerminal and s != stCompleted: return depFailed
+      ok = s == stCompleted
+    of "afternotok":
+      if s == stCompleted: return depFailed
+      ok = r.job.isTerminal and s != stCompleted
     of "afterany", "after": ok = r.job.isTerminal
     else: ok = true # unknown type: satisfied (warned at submit)
     if not ok: return depWaiting
@@ -133,6 +137,7 @@ proc depsSatisfied(j: Job; jobs: seq[Job]; maxId: int): DepResult =
     if group.len == 0: continue
     let r = depGroupState(j, group, jobs, maxId)
     if r == depUnresolvable: return depUnresolvable
+    if r == depFailed: return depFailed
     if r == depWaiting: result = depWaiting
 
 proc tick(procs: var Table[int, Process]; cpuCap: int) =
@@ -192,12 +197,21 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
         jobs[i].state = if elems.allIt(it.state == stCompleted): stCompleted else: stFailed
         jobs[i].endTime = nowStr
 
-    # Phase C: fail PENDING jobs whose dependencies reference unallocated IDs.
+    # Phase C: resolve invalid dependencies, like slurmctld's
+    # handle_invalid_dependency(). A dep on an ID that was never allocated
+    # fails the job (real SLURM rejects it at submit); a dep that can never
+    # be satisfied (afterok on a failed job, afternotok on a completed one)
+    # cancels it.
     for i in 0 ..< jobs.len:
       if jobs[i].state != stPending: continue
-      if depsSatisfied(jobs[i], jobs, maxId) == depUnresolvable:
+      case depsSatisfied(jobs[i], jobs, maxId)
+      of depUnresolvable:
         jobs[i].state = stFailed
         jobs[i].endTime = nowStr
+      of depFailed:
+        jobs[i].state = stCancelled
+        jobs[i].endTime = nowStr
+      else: discard
 
     # Phase D: time-limit enforcement.
     for i in 0 ..< jobs.len:

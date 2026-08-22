@@ -33,12 +33,13 @@ wait_state() {
   return 1
 }
 
-# Test 1: basic submit/run/output/exit code.
+# Test 1: basic submit/run/output/exit code; args reach the script;
+# ex.sb's own directives name the output (slurmout/%x-%j.out).
 cd "$w"
 "$repo/sbatch" "$repo/ex.sb" one two > /dev/null
 id1=$(tail -1 jobs.csv | cut -d, -f1)
 if wait_state "$id1" CD 20; then
-  if grep -q "ran okay one two" "$w/slurm-$id1.out" && \
+  if grep -q "ran okay one two" "$w/slurmout/tpotpipeline-$id1.out" && \
      [ "$(awk -F, -v j="$id1" '$1==j{print $8}' jobs.csv)" = "0" ]; then
     pass=$((pass + 1)); echo "PASS 1 basic"
   else
@@ -117,10 +118,10 @@ idPos=$(tail -1 jobs.csv | cut -d, -f1)
 if wait_state "$idF" F 20 && \
    [ "$(awk -F, -v j="$idF" '$1==j{print $8}' jobs.csv)" = "3" ]; then
   if wait_state "$idNeg" CD 20 && grep -q "neg-ran" "$w/neg-$idNeg.out"; then
-    if ! wait_state "$idPos" CD 6 && [ ! -e "$w/pos-$idPos.out" ]; then
+    if wait_state "$idPos" CA 10 && [ ! -e "$w/pos-$idPos.out" ]; then
       pass=$((pass + 1)); echo "PASS 4 failure semantics"
     else
-      note_fail "test 4: afterok job ran despite FAILED dep"
+      note_fail "test 4: afterok job not CANCELLED after FAILED dep"
     fi
   else
     note_fail "test 4: afternotok job never completed"
