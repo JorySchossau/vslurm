@@ -57,7 +57,10 @@ idA=$(./sbatch --parsable a.sb)          # prints just: 2
   terminal: `./vsched`, optionally with `--cpus N` to override the CPU
   budget (default: the machine's online core count — `N` may exceed the
   real count to test concurrency on a smaller box), or `./vsched --once`
-  for a single tick.
+  for a single tick. It prints one line per event — startup, submissions,
+  job launch/completion/failure/timeout, cancellations (whether it decided
+  them or `scancel`/`srun` did), DB purges — so the terminal it runs in
+  shows what the scheduler is doing without per-tick noise.
 - `squeue` — reads the DB read-only under lock; `JOBID NAME STATE TIME`.
 - `scancel` — marks jobs CANCELLED and SIGTERMs the running process.
 - `srun` — submits an inline command line as a PENDING job, then polls the

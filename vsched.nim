@@ -18,6 +18,21 @@ proc countCPUs(): int =
   let n = posix.sysconf(posix.SC_NPROCESSORS_ONLN)
   if n > 0: n else: 1
 
+proc log(msg: string) =
+  ## One concise line per observable event (never per-tick chatter), so the
+  ## terminal where vsched runs shows the daemon's lifecycle at a glance.
+  stdout.writeLine("vsched: " & msg)
+  stdout.flushFile()
+
+proc describe*(j: Job): string =
+  "job " & j.displayId & " (" & j.name & ")"
+
+proc elapsedStr(j: Job; now: times.Time): string =
+  if j.start.len > 0:
+    " after " & $(now - parseDbTime(j.start)).inSeconds & "s"
+  else:
+    ""
+
 proc pidAlive(pid: int): bool =
   ## kill(pid, 0) probes existence; ESRCH means gone, EPERM (not our child)
   ## still means the process exists.
@@ -140,7 +155,8 @@ proc depsSatisfied(j: Job; jobs: seq[Job]; maxId: int): DepResult =
     if r == depFailed: return depFailed
     if r == depWaiting: result = depWaiting
 
-proc tick(procs: var Table[int, Process]; cpuCap: int) =
+proc tick(procs: var Table[int, Process]; cpuCap: int;
+           known: var Table[int, string]; seeded: var bool) =
   let db = dbPath()
   var f: File
   if not openDb(db, f):
@@ -151,6 +167,30 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
     let now = getTime()
     let nowStr = formatDbTime(now)
     let maxId = allocatedMaxId(db)
+
+    # Phase 0: report state changes other tools made between ticks. vsched
+    # holds the DB lock only while ticking, so sbatch/srun submissions and
+    # scancel (or srun signal) cancellations land here, not in a phase below.
+    # The first tick just seeds the snapshot: rows already in the DB predate
+    # this server and get their own logs (adoption, launch) elsewhere.
+    if not seeded:
+      for j in jobs: known[j.id] = j.state
+      seeded = true
+    else:
+      var newElems = initCountTable[int]()
+      for j in jobs:
+        if j.isElementJob and not known.hasKey(j.id): newElems.inc(j.arrayId)
+      for j in jobs:
+        if not known.hasKey(j.id):
+          if j.isElementJob: continue # covered by the master's line
+          if j.isMasterJob and newElems.hasKey(j.id):
+            log("submitted " & describe(j) & ", array of " &
+              $newElems[j.id] & " elements")
+          else:
+            log("submitted " & describe(j))
+        elif known[j.id] != j.state and j.state == stCancelled:
+          log(describe(j) & " cancelled by external request" &
+            elapsedStr(j, now))
 
     # Phase A: reap finished children / adopt orphans.
     for i in 0 ..< jobs.len:
@@ -164,6 +204,8 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
           jobs[i].exitcode = ec
           jobs[i].hasExit = true
           jobs[i].endTime = nowStr
+          log(describe(jobs[i]) & " " & jobs[i].state.toLowerAscii &
+            " exit " & $ec & elapsedStr(jobs[i], now))
       else:
         # Orphan (server restarted): if the PID is gone we can only mark it
         # finished — the true exit code is unknowable.
@@ -172,6 +214,8 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
           jobs[i].exitcode = -1
           jobs[i].hasExit = false
           jobs[i].endTime = nowStr
+          log(describe(jobs[i]) & " completed (adopted orphan, exit code unknown)" &
+            elapsedStr(jobs[i], now))
 
     # Phase B: escalate lingering terminal jobs still holding a process.
     for i in 0 ..< jobs.len:
@@ -180,7 +224,10 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
       if jobs[i].endTime.len == 0: continue
       let age = (now - parseDbTime(jobs[i].endTime)).inSeconds
       if procs[jobs[i].id].running:
-        if age > cancelGraceSeconds: procs[jobs[i].id].kill()
+        if age > cancelGraceSeconds:
+          procs[jobs[i].id].kill()
+          log(describe(jobs[i]) & " still running " & $age &
+            "s after " & jobs[i].state.toLowerAscii & "; sent SIGKILL")
       else:
         procs[jobs[i].id].close()
         procs.del(jobs[i].id)
@@ -196,6 +243,8 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
       if elems.len > 0 and elems.allIt(it.isTerminal):
         jobs[i].state = if elems.allIt(it.state == stCompleted): stCompleted else: stFailed
         jobs[i].endTime = nowStr
+        log(describe(jobs[i]) & " " & jobs[i].state.toLowerAscii &
+          " (array master, all " & $elems.len & " elements finished)")
 
     # Phase C: resolve invalid dependencies, like slurmctld's
     # handle_invalid_dependency(). A dep on an ID that was never allocated
@@ -208,9 +257,13 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
       of depUnresolvable:
         jobs[i].state = stFailed
         jobs[i].endTime = nowStr
+        log(describe(jobs[i]) & " failed: dependency " & jobs[i].dep &
+          " references an id that was never allocated")
       of depFailed:
         jobs[i].state = stCancelled
         jobs[i].endTime = nowStr
+        log(describe(jobs[i]) & " cancelled: dependency " & jobs[i].dep &
+          " can never be satisfied")
       else: discard
 
     # Phase D: time-limit enforcement.
@@ -226,6 +279,8 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
           discard posix.kill(Pid(jobs[i].pid), SIGKILL)
         jobs[i].state = stTimeout
         jobs[i].endTime = nowStr
+        log(describe(jobs[i]) & " timed out after " & $jobs[i].minutes &
+          "m limit; sent SIGKILL")
 
     # Phase E: launch PENDING jobs within the CPU budget.
     var usedCpus = 0
@@ -242,6 +297,8 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
       if not dirExists(jobs[idx].chdir):
         jobs[idx].state = stFailed
         jobs[idx].endTime = nowStr
+        log(describe(jobs[idx]) & " failed: chdir " & jobs[idx].chdir &
+          " no longer exists")
         continue
       # per-array concurrency cap (%N in the --array spec)
       if jobs[idx].arrayLimit > 0:
@@ -258,15 +315,27 @@ proc tick(procs: var Table[int, Process]; cpuCap: int) =
         jobs[idx].start = nowStr
         jobs[idx].pid = pid
         usedCpus += need
+        log("launched " & describe(jobs[idx]) & " pid " & $pid &
+          ", cpus " & $usedCpus & "/" & $cap)
 
     # Phase F: purge terminal rows past the retention window.
     var kept: seq[Job] = @[]
+    var purged = 0
     for j in jobs:
       if j.isTerminal and j.endTime.len > 0 and
           (now - parseDbTime(j.endTime)).inSeconds > purgeSeconds:
+        inc purged
         continue
       kept.add(j)
+    if purged > 0:
+      log("purged " & $purged & " finished job" & (if purged > 1: "s" else: "") &
+        " older than " & $(purgeSeconds div 60) & "m from the DB")
     jobs = kept
+
+    # Snapshot the states this tick wrote, so the next tick's Phase 0 only
+    # reports transitions vsched did not make itself.
+    known.clear()
+    for j in jobs: known[j.id] = j.state
 
     saveJobs(f, jobs)
   finally:
@@ -281,6 +350,8 @@ proc usage(): void =
 
 proc main() =
   var procs: Table[int, Process] = initTable[int, Process]()
+  var known: Table[int, string] = initTable[int, string]()
+  var seeded = false
   var cpuCap = countCPUs()
   var once = false
   var i = 1
@@ -306,11 +377,12 @@ proc main() =
     else:
       usage()
     inc i
+  log("scheduler started: cpu budget " & $cpuCap & ", db " & dbPath())
   if once:
-    tick(procs, cpuCap)
+    tick(procs, cpuCap, known, seeded)
   else:
     while true:
-      tick(procs, cpuCap)
+      tick(procs, cpuCap, known, seeded)
       sleep(1000)
 
 main()
