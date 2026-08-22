@@ -180,11 +180,25 @@ proc unlockDb*(f: File) =
   discard posix.lockf(f.getFileHandle(), posix.F_ULOCK, 0)
 
 proc loadJobs*(f: File): seq[Job] =
+  ## Quoted cells may contain newlines (e.g. a --wrap payload with several
+  ## commands), so records span physical lines: keep joining lines while the
+  ## record's double quotes are unbalanced (inside a quoted cell).
   result = @[]
+  var pending = ""
+  var carrying = false
   for line in f.lines:
     let line = line.strip(chars = {'\r'}, trailing = true)
-    if line.len == 0: continue
-    let cells = csvSplit(line)
+    if not carrying and line.len == 0: continue
+    let rec = if carrying: pending & "\n" & line else: line
+    var quotes = 0
+    for c in rec:
+      if c == '"': inc quotes
+    if quotes mod 2 == 1:
+      pending = rec
+      carrying = true
+      continue
+    carrying = false
+    let cells = csvSplit(rec)
     if cells.len != dbColumns: continue
     if cells[0].len == 0 or cells[0][0] notin {'0'..'9'}: continue
     result.add parseJob(cells)
