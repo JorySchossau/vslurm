@@ -11,5 +11,5 @@
 echo "beginning run..."
 date
 sleep 5
-echo "ran okay"
+echo "ran okay $*"
 date
