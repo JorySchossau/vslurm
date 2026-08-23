@@ -11,7 +11,7 @@ re = subprocess.run(
     ],
 )
 
-time.sleep(2)  # wait for vsched's next tick to launch the job
+time.sleep(2)  # wait for slurmctld's next tick to launch the job
 print("log.txt contents")
 print("---")
 if not path.isfile(file):

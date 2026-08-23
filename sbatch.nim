@@ -1,5 +1,5 @@
 ## sbatch: parse CLI options and #SBATCH directives, insert PENDING rows
-## into the jobs DB under lock. Never launches anything — vsched owns
+## into the jobs DB under lock. Never launches anything — slurmctld owns
 ## execution. One submit maps to one row, or to N rows for a job array
 ## (a master + N-1 elements) sharing the master's job id.
 
@@ -119,7 +119,7 @@ proc main() =
     o.output = if o.arraySpec.len > 0: "slurm-%A_%a.out" else: "slurm-%j.out"
   if o.chdir.len == 0: o.chdir = getCurrentDir()
   if not o.chdir.isAbsolute: o.chdir = getCurrentDir() / o.chdir
-  # store absolute paths so vsched can launch from any cwd; directives were
+  # store absolute paths so slurmctld can launch from any cwd; directives were
   # already parsed from the same file, only the recorded path changes
   if o.script.len > 0 and not o.script.isAbsolute:
     o.script = getCurrentDir() / o.script

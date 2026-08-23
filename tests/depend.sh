@@ -7,14 +7,14 @@
 # job will never be run" — it is CANCELLED, never left PENDING.
 #
 # Verification uses only local evidence: the job ids sbatch returns and
-# the jobs' own output files (a file exists iff vsched launched the job;
+# the jobs' own output files (a file exists iff slurmctld launched the job;
 # payloads timestamp themselves so ordering is provable from the files).
-# Nothing is read back from vsched's output or the jobs DB, so the test
+# Nothing is read back from slurmctld's output or the jobs DB, so the test
 # also works against an already-running scheduler:
 #
 #   tests/depend.sh existing
 #
-# which skips starting vsched and submits to whatever VSLURM_JOBS (or the
+# which skips starting slurmctld and submits to whatever VSLURM_JOBS (or the
 # default DB) the ambient environment points at.
 set -euo pipefail
 
@@ -32,7 +32,7 @@ w=$(mktemp -d)
 sched_pid=""
 if [ "${1:-}" != "existing" ]; then
   export VSLURM_JOBS=$w/jobs.csv
-  ./vsched > "$w/vsched.log" 2>&1 &
+  ./slurmctld > "$w/slurmctld.log" 2>&1 &
   sched_pid=$!
 fi
 

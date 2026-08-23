@@ -1,7 +1,7 @@
 ## srun: submit a command line as a single job, wait for the scheduler to
 ## run it, stream its output/error to the terminal as the files grow, then
 ## exit with the job's exit code. SIGINT/SIGTERM cancel the job (the same DB
-## transition scancel makes) and exit 1. Only vsched executes job code;
+## transition scancel makes) and exit 1. Only slurmctld executes job code;
 ## srun just submits, watches and reports.
 
 import os, strutils, times
@@ -189,7 +189,7 @@ proc main() =
       var warned2 = warned
       let outPath = expandSpec(o.output, id, id, -1, o.name, warned2)
       let errPath = expandSpec(o.errorFile, id, id, -1, o.name, warned2)
-      # Empty the files up front (vsched re-truncates with `>` at launch) so
+      # Empty the files up front (slurmctld re-truncates with `>` at launch) so
       # streaming can start at offset 0 with no stale bytes from a wiped DB.
       for p in [resolvePath(o.chdir, outPath), resolvePath(o.chdir, errPath)]:
         if p.len > 0:

@@ -286,7 +286,7 @@ proc allocatedMaxId*(db: string): int =
 
 # ---------------------------------------------------------------------------
 # Shell helpers shared by sbatch (quoting script args back into a command
-# line) and vsched (building the exec line).
+# line) and slurmctld (building the exec line).
 
 proc shellQuote*(s: string): string =
   "'" & s.replace("'", "'\\''") & "'"

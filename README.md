@@ -14,8 +14,8 @@ interpreter.
 Requires [Nim](https://nim-lang.org) 2.x and a POSIX shell.
 
 ```console
-$ make                     # builds sbatch squeue scancel srun sacct vsched
-$ ./vsched &               # the scheduler; leave it running in a terminal
+$ make                     # builds sbatch squeue scancel srun sacct slurmctld
+$ ./slurmctld &            # the scheduler; leave it running in a terminal
 $ cat > job.sb <<'EOF'
 #!/bin/bash
 #SBATCH --job-name=demo
@@ -31,7 +31,7 @@ $ cat out-1.out            # stdout landed exactly where SLURM would put it
 $ ./sacct -n               # accounting: state, elapsed, exit code
 ```
 
-Nothing runs until `vsched` is up — it's the only component that executes
+Nothing runs until `slurmctld` is up — it's the only component that executes
 job code, on a 1 s tick. Binaries can be installed on `PATH` with
 `make install PREFIX=~/.local` (default `/usr/local`); the DB lives under
 `$XDG_STATE_HOME` either way, so all commands work from any directory.
@@ -50,13 +50,13 @@ idA=$(./sbatch --parsable a.sb)          # prints just: 2
 
 - `sbatch` — parses CLI options and `#SBATCH` directives, inserts PENDING
   rows into the jobs DB. Never executes anything.
-- `vsched` — the daemon. Once per second it locks the DB, reaps finished
+- `slurmctld` — the daemon. Once per second it locks the DB, reaps finished
   jobs, enforces time limits, evaluates dependencies and the CPU budget,
   launches PENDING jobs, and purges rows of jobs that finished more than 5
   minutes ago. The only component that executes job code. Run it in a
-  terminal: `./vsched`, optionally with `--cpus N` to override the CPU
+  terminal: `./slurmctld`, optionally with `--cpus N` to override the CPU
   budget (default: the machine's online core count — `N` may exceed the
-  real count to test concurrency on a smaller box), or `./vsched --once`
+  real count to test concurrency on a smaller box), or `./slurmctld --once`
   for a single tick. It prints one line per event — startup, submissions,
   job launch/completion/failure/timeout, cancellations (whether it decided
   them or `scancel`/`srun` did), DB purges — so the terminal it runs in
@@ -67,7 +67,7 @@ idA=$(./sbatch --parsable a.sb)          # prints just: 2
   DB while streaming the job's output/error files to the terminal and
   exits with the job's exit code. SIGINT/SIGTERM cancel the job (same
   transition scancel makes) and exit 1. Never executes anything itself;
-  vsched does, so `srun` requires a running scheduler just like `sbatch`.
+  slurmctld does, so `srun` requires a running scheduler just like `sbatch`.
 - `sacct` — accounting view over the same DB: `JobID JobName State
   Elapsed ExitCode` by default, with job/state filters (`-j`, `-s`), a
   custom field list (`-o`/`--format`, `%N` min-width), `-X` (hide array
@@ -110,7 +110,7 @@ squeue/sacct `-j` filter accept both forms too.
 ## Scheduling model
 
 Single node. Each RUNNING job consumes `ntasks × cpus-per-task` of the
-CPU budget; vsched walks PENDING jobs in id order each tick and launches
+CPU budget; slurmctld walks PENDING jobs in id order each tick and launches
 those that fit in the remaining budget. A job that doesn't fit doesn't
 block later, smaller ones (no reservations), but a job whose
 `ntasks × cpus` exceeds the whole budget can never start and stays
@@ -118,19 +118,19 @@ PENDING forever — size `-n`/`-c` to the budget you run with.
 
 The budget defaults to the machine's online CPU count
 (`SC_NPROCESSORS_ONLN`, so hyperthreads count) and can be overridden per
-server with `vsched --cpus N` — a value larger than the physical core
+server with `slurmctld --cpus N` — a value larger than the physical core
 count oversubscribes the machine, which is exactly what you want when
 testing concurrent job workflows on a laptop; a small value (e.g.
 `--cpus 2`) forces queueing. Jobs run simultaneously for real: the cap is
 a scheduling budget, not a process or cgroup limit, so a single job may
 use more CPU than it was allocated. The override is not persisted — it
-applies for the lifetime of that vsched process only, so restarts and
+applies for the lifetime of that slurmctld process only, so restarts and
 other servers against the same DB use their own setting.
 
 Time limits (`--time`) have whole-minute granularity: `-t 90` means 90
 minutes, `MM:SS` and `HH:MM:SS`/`D-HH:MM:SS` round up to the next whole
 minute, and limits are enforced on the scheduler's 1 s tick by SIGKILL,
-putting the job in TIMEOUT. Cancelling sends SIGTERM first; vsched
+putting the job in TIMEOUT. Cancelling sends SIGTERM first; slurmctld
 escalates to SIGKILL if the process lingers ~5 s. Terminal rows are purged
 from the DB 5 minutes after they finish, so history in squeue/sacct only
 covers that window.
@@ -226,7 +226,7 @@ array elements.
 **Caveat:** jobs inherit the *scheduler's* environment, not the
 submitter's. `FOO=1 sbatch job.sb` does not put `FOO` in the job —
 `--export` has no effect. To get variables into jobs, set them in the sb
-script or start vsched with the environment you want.
+script or start slurmctld with the environment you want.
 
 ## DB schema
 
@@ -266,7 +266,7 @@ accounting.
   (srun warns on these).
 - `--begin` (deferred start): ignored — the job is eligible immediately.
 - Requeue/restart: `--requeue`, `scontrol requeue`, checkpointing: absent.
-  After a `vsched` restart, jobs that were running under the old process
+  After a `slurmctld` restart, jobs that were running under the old process
   are adopted by PID; when they die their exit codes are unknowable and
   recorded as empty (shown as COMPLETED with no exit code).
 - Mail (`--mail-user`/`--mail-type`), federation (`--cluster`), burst
@@ -311,7 +311,7 @@ temp dir: basic submit/run/output/exit-code, directive-driven naming,
 dependency chains, failure + `afternotok`/`afterok` gating, timeouts,
 arrays (files, env, squeue filters, master deps, element deps, element
 cancel, `%N` limit), cancellation, the CPU-budget cap and the
-`vsched --cpus` override, srun run/exit-code/files/cancel, and sacct
+`slurmctld --cpus` override, srun run/exit-code/files/cancel, and sacct
 field selection plus `-j`/`-s` filtering.
 
 `bash tests/depend.sh` exercises dependency semantics in isolation: an

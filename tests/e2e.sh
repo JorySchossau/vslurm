@@ -8,7 +8,7 @@ repo=$(pwd)
 make -s all
 w=$(mktemp -d)
 export VSLURM_JOBS=$w/jobs.csv
-./vsched > "$w/vsched.log" 2>&1 &
+./slurmctld > "$w/slurmctld.log" 2>&1 &
 sched_pid=$!
 trap 'kill $sched_pid 2>/dev/null || true; wait $sched_pid 2>/dev/null || true; rm -rf "$w"' EXIT
 
@@ -295,7 +295,7 @@ fi
 kill $sched_pid 2>/dev/null || true
 wait $sched_pid 2>/dev/null || true
 export VSLURM_JOBS=$w/jobs-cpus.csv
-"$repo/vsched" --cpus 2 > "$w/vsched-cpus.log" 2>&1 &
+"$repo/slurmctld" --cpus 2 > "$w/slurmctld-cpus.log" 2>&1 &
 sched_pid=$!
 for i in $(seq 1 5); do
   "$repo/sbatch" -o "$w/sl7b-%j.out" --wrap 'sleep 3' > /dev/null
@@ -305,10 +305,10 @@ nlow=$("$repo/squeue" -h | awk '$3 == "R"' | wc -l)
 kill $sched_pid 2>/dev/null || true
 wait $sched_pid 2>/dev/null || true
 export VSLURM_JOBS=$w/jobs.csv
-"$repo/vsched" > "$w/vsched.log" 2>&1 &
+"$repo/slurmctld" > "$w/slurmctld.log" 2>&1 &
 sched_pid=$!
 if [ "$nlow" -eq 2 ]; then
-  pass=$((pass + 1)); echo "PASS 7b vsched --cpus 2 caps at 2"
+  pass=$((pass + 1)); echo "PASS 7b slurmctld --cpus 2 caps at 2"
 else
   note_fail "test 7b: --cpus 2 left $nlow running (expected 2)"
 fi

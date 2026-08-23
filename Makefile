@@ -1,6 +1,6 @@
 NIMFLAGS = --hints:off --warnings:off -d:release
 
-all: squeue sbatch vsched scancel srun sacct
+all: squeue sbatch slurmctld scancel srun sacct
 
 squeue: squeue.nim vslurm_common.nim
 	nim c $(NIMFLAGS) -o:$@ $<
@@ -8,7 +8,7 @@ squeue: squeue.nim vslurm_common.nim
 sbatch: sbatch.nim vslurm_common.nim
 	nim c $(NIMFLAGS) -o:$@ $<
 
-vsched: vsched.nim vslurm_common.nim
+slurmctld: slurmctld.nim vslurm_common.nim
 	nim c $(NIMFLAGS) -o:$@ $<
 
 scancel: scancel.nim vslurm_common.nim
@@ -22,7 +22,7 @@ sacct: sacct.nim vslurm_common.nim
 
 install: all
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
-	cp squeue sbatch vsched scancel srun sacct $(DESTDIR)$(PREFIX)/bin
+	cp squeue sbatch slurmctld scancel srun sacct $(DESTDIR)$(PREFIX)/bin
 
 check:
 	@for f in *.nim; do \
@@ -30,6 +30,6 @@ check:
 	done
 
 clean:
-	rm -f squeue sbatch vsched scancel srun sacct
+	rm -f squeue sbatch slurmctld scancel srun sacct
 
 .PHONY: all install check clean

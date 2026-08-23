@@ -1,5 +1,5 @@
 ## scancel: mark PENDING/RUNNING jobs CANCELLED and SIGTERM their process.
-## The row's state is authoritative; vsched escalates to SIGKILL if needed.
+## The row's state is authoritative; slurmctld escalates to SIGKILL if needed.
 ## Accepts plain ids, array master ids (cancels the whole array) and
 ## `master_task` element ids.
 

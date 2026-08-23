@@ -25,7 +25,7 @@ note_fail() {
 
 # scheduler runs from an unrelated directory
 mkdir -p "$w/scheddir"
-(cd "$w/scheddir" && vsched > "$w/vsched.log" 2>&1) &
+(cd "$w/scheddir" && slurmctld > "$w/slurmctld.log" 2>&1) &
 sched_pid=$!
 trap 'kill $sched_pid 2>/dev/null || true; wait $sched_pid 2>/dev/null || true; rm -rf "$w" "$root"' EXIT
 
@@ -58,7 +58,7 @@ if wait_state "$id1" CD 20; then
     note_fail "test 1: output wrong: $(cat "$w/dirA/slurm-$id1.out" 2>/dev/null)"
   fi
 else
-  note_fail "test 1: never COMPLETED (log: $(tail -3 "$w/vsched.log" 2>/dev/null))"
+  note_fail "test 1: never COMPLETED (log: $(tail -3 "$w/slurmctld.log" 2>/dev/null))"
 fi
 
 # 2. the state dir default is honored: same DB seen from anywhere

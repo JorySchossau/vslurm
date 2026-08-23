@@ -1,4 +1,4 @@
-## vsched: the execution daemon. Once per second: lock DB, reap finished
+## slurmctld: the execution daemon. Once per second: lock DB, reap finished
 ## jobs, enforce time limits, evaluate dependencies + CPU budget, launch
 ## PENDING jobs, purge long-finished ones, rewrite the DB in place.
 ## The only component that ever executes job code.
@@ -20,8 +20,8 @@ proc countCPUs(): int =
 
 proc log(msg: string) =
   ## One concise line per observable event (never per-tick chatter), so the
-  ## terminal where vsched runs shows the daemon's lifecycle at a glance.
-  stdout.writeLine("vsched: " & msg)
+  ## terminal where slurmctld runs shows the daemon's lifecycle at a glance.
+  stdout.writeLine("slurmctld: " & msg)
   stdout.flushFile()
 
 proc describe*(j: Job): string =
@@ -60,7 +60,7 @@ proc buildEnv(j: Job; jobs: seq[Job]): StringTableRef =
     result["SLURM_ARRAY_TASK_COUNT"] = $count
 
 proc runCommand(j: Job): string =
-  ## The exact command vsched executes: either the submitted script (run
+  ## The exact command slurmctld executes: either the submitted script (run
   ## under its shebang interpreter if it has one, else $SHELL) with the
   ## recorded args, or the --wrap payload under $SHELL -c.
   if j.wrap.len > 0:
@@ -160,7 +160,7 @@ proc tick(procs: var Table[int, Process]; cpuCap: int;
   let db = dbPath()
   var f: File
   if not openDb(db, f):
-    stderr.writeLine("vsched: cannot open " & db)
+    stderr.writeLine("slurmctld: cannot open " & db)
     quit(1)
   try:
     var jobs = loadJobs(f)
@@ -168,7 +168,7 @@ proc tick(procs: var Table[int, Process]; cpuCap: int;
     let nowStr = formatDbTime(now)
     let maxId = allocatedMaxId(db)
 
-    # Phase 0: report state changes other tools made between ticks. vsched
+    # Phase 0: report state changes other tools made between ticks. slurmctld
     # holds the DB lock only while ticking, so sbatch/srun submissions and
     # scancel (or srun signal) cancellations land here, not in a phase below.
     # The first tick just seeds the snapshot: rows already in the DB predate
@@ -333,7 +333,7 @@ proc tick(procs: var Table[int, Process]; cpuCap: int;
     jobs = kept
 
     # Snapshot the states this tick wrote, so the next tick's Phase 0 only
-    # reports transitions vsched did not make itself.
+    # reports transitions slurmctld did not make itself.
     known.clear()
     for j in jobs: known[j.id] = j.state
 
@@ -342,7 +342,7 @@ proc tick(procs: var Table[int, Process]; cpuCap: int;
     closeDb(f)
 
 proc usage(): void =
-  stderr.writeLine("Usage: vsched [--cpus N] [--once]")
+  stderr.writeLine("Usage: slurmctld [--cpus N] [--once]")
   stderr.writeLine("  --cpus N   CPU budget (default: this machine's online core count).")
   stderr.writeLine("             N may exceed the real core count, to test concurrent")
   stderr.writeLine("             workflows on a machine with fewer cores.")
@@ -365,14 +365,14 @@ proc main() =
           paramStr(i).parseInt > 0:
         cpuCap = paramStr(i).parseInt
       else:
-        stderr.writeLine("vsched: error: invalid --cpus value '" & paramStr(i) & "'")
+        stderr.writeLine("slurmctld: error: invalid --cpus value '" & paramStr(i) & "'")
         quit(1)
     elif a.startsWith("--cpus="):
       let v = a[7 .. ^1]
       if v.len > 0 and v.allCharsInSet(Digits) and v.parseInt > 0:
         cpuCap = v.parseInt
       else:
-        stderr.writeLine("vsched: error: invalid --cpus value '" & v & "'")
+        stderr.writeLine("slurmctld: error: invalid --cpus value '" & v & "'")
         quit(1)
     else:
       usage()
