@@ -116,44 +116,105 @@ proc resolveDepRef*(refStr: string; jobs: seq[Job]): tuple[found: bool, job: Job
       return (true, k)
   (false, Job())
 
-proc depGroupState(j: Job; group: string; jobs: seq[Job]; maxId: int): DepResult =
-  ## Evaluate one comma group `type:id[:id...]`. A dep on an array master id
+proc depAtomState(j: Job; atom: DepAtom; jobs: seq[Job]; maxId: int;
+                   now: times.Time): DepResult =
+  ## Evaluate one atom `type:target[:target...]`. A dep on an array master id
   ## means "that array finished"; element deps use `master_task` refs.
-  let parts = group.split(':')
-  if parts.len < 2: return depSatisfied
-  let t = parts[0]
-  for idStr in parts[1 .. ^1]:
-    if idStr.len == 0: continue
-    let r = resolveDepRef(idStr, jobs)
+  ## Terminology follows SLURM's test_job_dependency(): a dep atom is
+  ## fulfilled, not fulfilled (waiting) or failed (can never be met).
+  if atom.kind == "singleton":
+    # Satisfied unless another same-name job is RUNNING or was submitted
+    # earlier and is still PENDING (single user, no suspended state here).
+    for k in jobs:
+      if k.arrayId > 0 and k.arrayId == j.arrayId: continue
+      if k.name != j.name: continue
+      if k.state == stRunning or (k.state == stPending and k.id < j.id):
+        return depWaiting
+    return depSatisfied
+  for t in atom.targets:
+    let r = resolveDepRef(t.refStr, jobs)
     if not r.found:
       # Not in the DB: either finished long ago and was purged (satisfied,
       # since jobs.seq guarantees the ID was allocated) or never existed.
-      let js = parseJobSpec(idStr)
-      if js.job <= maxId: continue
+      if t.spec.job <= maxId: continue
       return depUnresolvable
     let s = r.job.state
     var ok = false
-    case t
+    case atom.kind
     of "afterok":
       if r.job.isTerminal and s != stCompleted: return depFailed
       ok = s == stCompleted
     of "afternotok":
-      if s == stCompleted: return depFailed
+      if r.job.isTerminal and s == stCompleted: return depFailed
       ok = r.job.isTerminal and s != stCompleted
-    of "afterany", "after": ok = r.job.isTerminal
+    of "afterany": ok = r.job.isTerminal
+    of "after":
+      # Fires once the target has STARTED (or was cancelled); +minutes adds
+      # a delay measured from that start/cancellation. Docs: "no time" = no
+      # delay; `after` never fails on termination state.
+      let startOrCancel = r.job.start.len > 0 or
+        (r.job.isTerminal and r.job.state == stCancelled)
+      if not startOrCancel: return depWaiting
+      if t.delay >= 0:
+        let base = if r.job.start.len > 0: parseDbTime(r.job.start)
+          else: parseDbTime(r.job.endTime)
+        if base.toUnix == 0: return depWaiting
+        if (now - base).inSeconds < t.delay * 60: return depWaiting
+      ok = true
+    of "aftercorr":
+      # Corresponding array task of the target must have completed with
+      # exit 0; a non-array dependent or non-array target behaves as afterok
+      # on the target as a whole (master = the whole array).
+      if j.isArrayJob and j.isElementJob and t.spec.task < 0:
+        # this job is array element M of its own master; the corresponding
+        # task is the target array's element M
+        let corr: tuple[job, task: int] = (t.spec.job, j.arrayTask)
+        var found = false
+        var corrJob: Job
+        for k in jobs:
+          if k.arrayId == corr.job and k.arrayTask == corr.task:
+            found = true
+            corrJob = k
+            break
+        if found:
+          if corrJob.state == stCompleted: ok = true
+          elif corrJob.isTerminal: return depFailed
+          else: return depWaiting
+        else:
+          # target row purged: treat like any purged dep
+          if t.spec.job <= maxId: ok = true else: return depUnresolvable
+      else:
+        if r.job.isTerminal and s != stCompleted: return depFailed
+        ok = s == stCompleted
+    of "afterburstbuffer":
+      # No burst buffers exist here; stage-out is vacuously instant.
+      ok = r.job.isTerminal
     else: ok = true # unknown type: satisfied (warned at submit)
     if not ok: return depWaiting
   depSatisfied
 
-proc depsSatisfied(j: Job; jobs: seq[Job]; maxId: int): DepResult =
+proc depsSatisfied(j: Job; jobs: seq[Job]; maxId: int; now: times.Time): DepResult =
   if j.dep.len == 0: return depSatisfied
-  result = depSatisfied
-  for group in j.dep.split(','):
-    if group.len == 0: continue
-    let r = depGroupState(j, group, jobs, maxId)
-    if r == depUnresolvable: return depUnresolvable
-    if r == depFailed: return depFailed
-    if r == depWaiting: result = depWaiting
+  let d = parseDepDeps(j.dep)
+  if d.atoms.len == 0: return depSatisfied
+  if d.anyOf:
+    # `?`: any fulfilled atom releases the job; an atom that failed (or
+    # references an id that was never allocated) just drops out, and the
+    # job is cancelled only when no atom can ever be met — SLURM's
+    # or_flag/or_satisfied handling.
+    result = depFailed
+    for a in d.atoms:
+      var r = depAtomState(j, a, jobs, maxId, now)
+      if r == depUnresolvable: r = depFailed
+      if r == depSatisfied: return depSatisfied
+      if r == depWaiting: result = depWaiting
+  else:
+    result = depSatisfied
+    for a in d.atoms:
+      let r = depAtomState(j, a, jobs, maxId, now)
+      if r == depUnresolvable: return depUnresolvable
+      if r == depFailed: return depFailed
+      if r == depWaiting: result = depWaiting
 
 proc tick(procs: var Table[int, Process]; cpuCap: int;
            known: var Table[int, string]; seeded: var bool) =
@@ -253,7 +314,7 @@ proc tick(procs: var Table[int, Process]; cpuCap: int;
     # cancels it.
     for i in 0 ..< jobs.len:
       if jobs[i].state != stPending: continue
-      case depsSatisfied(jobs[i], jobs, maxId)
+      case depsSatisfied(jobs[i], jobs, maxId, now)
       of depUnresolvable:
         jobs[i].state = stFailed
         jobs[i].endTime = nowStr
@@ -293,7 +354,7 @@ proc tick(procs: var Table[int, Process]; cpuCap: int;
     pend.sort(proc(a, b: int): int = jobs[a].id - jobs[b].id)
     for idx in pend:
       if jobs[idx].isMasterJob: continue # masters aggregate; elements run
-      if depsSatisfied(jobs[idx], jobs, maxId) != depSatisfied: continue
+      if depsSatisfied(jobs[idx], jobs, maxId, now) != depSatisfied: continue
       if not dirExists(jobs[idx].chdir):
         jobs[idx].state = stFailed
         jobs[idx].endTime = nowStr

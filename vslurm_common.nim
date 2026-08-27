@@ -600,30 +600,108 @@ proc parseTimeSpec*(v: string): int =
     let s = parts[2].parseInt
     result = days * 1440 + h * 60 + m + (if s > 0: 1 else: 0)
 
-const depTypes* = ["afterok", "afternotok", "afterany", "after"]
+# A dependency is a list of atoms separated by `,` (all must be satisfied)
+# or `?` (any one suffices); mixing separators is invalid, matching
+# _parse_dependency_str() in slurmctld. Each atom is one type plus one or
+# more targets; targets keep SLURM's master_task form for element refs.
+# `after` targets may carry a `+minutes` delay suffix.
+type
+  DepTarget* = object
+    refStr* = ""       ## display/raw form: `123`, `101_3`, `123+2`
+    spec*: tuple[job, task: int] ## parseJobSpec of the id part
+    delay* = -1        ## minutes; -1 = no delay
+  DepAtom* = object
+    kind* = ""         ## afterok/afternotok/afterany/after/aftercorr/afterburstbuffer/singleton
+    targets*: seq[DepTarget]
+  Deps* = object
+    anyOf* = false     ## separator was `?` rather than `,`
+    atoms*: seq[DepAtom]
 
-proc validateDep*(tool, v: string; warned: var seq[string]): string =
-  var groups: seq[string] = @[]
-  for g in v.split(','):
+proc parseDepDelay*(s: string): tuple[refStr: string, spec: tuple[job, task: int], delay: int] =
+  ## Split an optional `+minutes` suffix off a dependency target.
+  result = (s, (0, -1), -1)
+  let plus = s.rfind('+')
+  var idPart = s
+  if plus > 0:
+    let d = s[plus + 1 .. ^1]
+    if d.len > 0 and d.allCharsInSet(Digits):
+      idPart = s[0 ..< plus]
+      result.delay = d.parseInt
+  result.refStr = idPart
+  result.spec = parseJobSpec(idPart)
+
+proc parseDepDeps*(v: string): Deps =
+  ## Structural parse only; validation/warnings happen in validateDep.
+  let sep = if v.contains('?'): '?' else: ','
+  if v.len > 0 and sep == '?': result.anyOf = true
+  for g in v.split(sep):
     if g.len == 0: continue
     let parts = g.split(':')
-    let t = parts[0]
-    if t notin depTypes:
-      warnOnce(tool & ": warning: unsupported dependency type '" & t & "' ignored", warned)
-      continue
-    var ids: seq[string] = @[]
-    var ok = parts.len > 1
+    var atom = DepAtom(kind: parts[0])
     for p in parts[1 .. ^1]:
-      let js = parseJobSpec(p)
-      if p.len > 0 and js.job > 0:
-        ids.add p # keep SLURM's master_task form for element refs
+      let d = parseDepDelay(p)
+      atom.targets.add DepTarget(refStr: d.refStr, spec: d.spec, delay: d.delay)
+    result.atoms.add atom
+
+const depTypes* = ["afterok", "afternotok", "afterany", "after", "aftercorr",
+  "afterburstbuffer"]
+
+proc fmtDep*(d: Deps): string =
+  ## Canonical text form persisted in the DB and exported as
+  ## SLURM_JOB_DEPENDENCY: `type:ref[:ref...]` groups joined by the
+  ## original separator; delays kept, `singleton` bare.
+  var groups: seq[string] = @[]
+  for a in d.atoms:
+    if a.kind == "singleton":
+      groups.add "singleton"
+      continue
+    var ts: seq[string] = @[]
+    for t in a.targets:
+      # re-attach the +minutes delay so the persisted form round-trips
+      ts.add if t.delay >= 0: t.refStr & "+" & $t.delay else: t.refStr
+    if ts.len > 0: groups.add a.kind & ":" & ts.join(":")
+  groups.join(if d.anyOf: "?" else: ",")
+
+proc depSeparatorError*(tool, v: string): string =
+  ## Empty when the separator structure is legal, else a SLURM-style error
+  ## message. Mixing separators or repeating `?` is a hard parse error in
+  ## real sbatch (ESLURM_DEPENDENCY), not a warn-and-drop case.
+  if v.contains(',') and v.contains('?'):
+    return tool & ": error: invalid dependency '" & v &
+      "': ',' and '?' separators cannot be mixed"
+  if v.count('?') > 1:
+    return tool & ": error: invalid dependency '" & v &
+      "': only one '?' separator is allowed"
+  if v.contains('?'):
+    for seg in v.split('?'):
+      if seg.strip().len == 0:
+        return tool & ": error: invalid dependency '" & v &
+          "': empty dependency near '?'"
+  ""
+
+proc validateDep*(tool, v: string; warned: var seq[string]): string =
+  var d = parseDepDeps(v)
+  var kept: seq[DepAtom] = @[]
+  for a in d.atoms:
+    if a.kind == "singleton":
+      kept.add a
+      continue
+    if a.kind notin depTypes:
+      warnOnce(tool & ": warning: unsupported dependency type '" & a.kind & "' ignored", warned)
+      continue
+    var ts: seq[DepTarget] = @[]
+    for t in a.targets:
+      if t.refStr.len > 0 and t.spec.job > 0:
+        # keep SLURM's master_task form for element refs; the +minutes delay
+        # only affects `after` but round-trips for every type
+        ts.add t
       else:
-        warnOnce(tool & ": warning: invalid job id '" & p & "' in dependency '" &
-          g & "' ignored", warned)
-        ok = false
-    if ok and ids.len > 0:
-      groups.add t & ":" & ids.join(":")
-  result = groups.join(",")
+        warnOnce(tool & ": warning: invalid job id '" & t.refStr & "' in dependency '" &
+          a.kind & ":" & t.refStr & "' ignored", warned)
+    if ts.len > 0:
+      kept.add DepAtom(kind: a.kind, targets: ts)
+  if kept.len == 0: return ""
+  fmtDep(Deps(anyOf: d.anyOf, atoms: kept))
 
 proc fmtElapsed*(secs: int): string =
   ## SLURM's [D-]HH:MM:SS elapsed-time format, as squeue/sacct print it.

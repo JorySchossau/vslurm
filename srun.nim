@@ -38,7 +38,12 @@ proc applyOption(opt, val: string; o: var Opts; warned: var seq[string]) =
   of "output": o.output = val
   of "error": o.errorFile = val
   of "chdir": o.chdir = val
-  of "depend": o.dep = validateDep("srun", val, warned)
+  of "depend":
+    let sepErr = depSeparatorError("srun", val)
+    if sepErr.len > 0:
+      stderr.writeLine(sepErr)
+      quit(1)
+    o.dep = validateDep("srun", val, warned)
   of "time":
     let m = parseTimeSpec(val)
     if m >= 0:

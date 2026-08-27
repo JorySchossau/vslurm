@@ -125,7 +125,121 @@ else
   note_fail "case 3: H never ran"
 fi
 
-echo "PASS $pass/3"
+# Case 4: `?` any-of — dependent runs as soon as ONE branch completes.
+idJ=$("$repo/sbatch" --parsable -o "$w/q-j-%j.out" --wrap 'sleep 3; echo "J-done"')
+idK=$("$repo/sbatch" --parsable -o "$w/q-k-%j.out" --wrap 'echo "K-done"')
+idL=$("$repo/sbatch" --parsable -o "$w/q-l-%j.out" -d "afterok:$idJ?afterok:$idK" --wrap 'echo "L-ran"')
+if wait_grep "$w/q-k-$idK.out" "K-done" 30 && \
+   ! grep -q "J-done" "$w/q-j-$idJ.out"; then
+  if wait_grep "$w/q-l-$idL.out" "L-ran" 10; then
+    pass=$((pass + 1)); echo "PASS 4 '?' any-of releases on first satisfied branch"
+  else
+    note_fail "case 4: any-of dependent never ran after one branch completed"
+  fi
+else
+  note_fail "case 4: setup failed (K not done or J finished too early)"
+fi
+
+# Case 5: `?` with every branch failed cancels the dependent job.
+idM=$("$repo/sbatch" --parsable -o "$w/q-m-%j.out" --wrap 'sleep 2; echo "M-ran"; exit 4')
+idN=$("$repo/sbatch" --parsable -o "$w/q-n-%j.out" --wrap 'sleep 2; echo "N-ran"; exit 4')
+idO=$("$repo/sbatch" --parsable -o "$w/q-o-%j.out" -d "afterok:$idM?afterok:$idN" --wrap 'echo "O-ran"')
+if wait_grep "$w/q-m-$idM.out" "M-ran" 30 && wait_grep "$w/q-n-$idN.out" "N-ran" 30; then
+  if absent_after "$w/q-o-$idO.out" 6; then
+    pass=$((pass + 1)); echo "PASS 5 '?' all branches failed -> never run"
+  else
+    note_fail "case 5: any-of dependent ran despite all branches failing"
+  fi
+else
+  note_fail "case 5: setup failed (a branch never FAILED)"
+fi
+
+# Case 6: mixed ','/'?' separators are a hard submit error.
+if "$repo/sbatch" -d "afterok:1,afterany:2?afterok:3" --wrap 'true' \
+     > "$w/sep.out" 2> "$w/sep.err"; then
+  note_fail "case 6: mixed separators accepted (should be fatal)"
+else
+  if grep -q "cannot be mixed" "$w/sep.err"; then
+    pass=$((pass + 1)); echo "PASS 6 mixed separators rejected at submit"
+  else
+    note_fail "case 6: mixed separators failed without the expected message"
+  fi
+fi
+
+# Case 7: singleton — dependent waits for same-name job to finish.
+idP=$("$repo/sbatch" --parsable -J singleton-test -o "$w/sg-p-%j.out" --wrap 'sleep 3; echo "P-done"')
+idQ=$("$repo/sbatch" --parsable -J singleton-test -o "$w/sg-q-%j.out" -d singleton --wrap 'echo "Q-ran"')
+if wait_grep "$w/sg-p-$idP.out" "P-done" 30; then
+  if wait_grep "$w/sg-q-$idQ.out" "Q-ran" 10; then
+    if [ ! -e "$w/sg-q-$idQ.out" ]; then
+      note_fail "case 7: singleton job never ran"
+    else
+      pass=$((pass + 1)); echo "PASS 7 singleton waits for same-name job"
+    fi
+  else
+    note_fail "case 7: singleton job never ran"
+  fi
+else
+  note_fail "case 7: first same-name job never finished"
+fi
+
+# Case 8: after:JOBID — dependent runs once the dependency has STARTED,
+# long before it finishes.
+idR=$("$repo/sbatch" --parsable -o "$w/af-r-%j.out" --wrap 'sleep 5; echo "R-done"')
+idS=$("$repo/sbatch" --parsable -o "$w/af-s-%j.out" -d "after:$idR" --wrap 'echo "S-ran $(date +%s)"')
+if wait_grep "$w/af-s-$idS.out" "S-ran" 10; then
+  # S launched while R (sleep 5) was still running: its marker must predate
+  # R's own completion marker in the same tick window.
+  if ! grep -q "R-done" "$w/af-r-$idR.out"; then
+    pass=$((pass + 1)); echo "PASS 8 after: fires on dependency START"
+  else
+    note_fail "case 8: dependent ran only after dependency finished"
+  fi
+  wait_grep "$w/af-r-$idR.out" "R-done" 30 || true
+else
+  note_fail "case 8: dependent never ran while dependency was running"
+fi
+
+# Case 9: after:JOBID+1 — the +minutes delay holds the job back.
+idT=$("$repo/sbatch" --parsable -o "$w/af-t-%j.out" --wrap 'echo "T-start $(date +%s)"')
+idU=$("$repo/sbatch" --parsable -o "$w/af-u-%j.out" -d "after:$idT+1" --wrap 'echo "U-ran"')
+if wait_grep "$w/af-t-$idT.out" "T-start" 30; then
+  if absent_after "$w/af-u-$idU.out" 5; then
+    pass=$((pass + 1)); echo "PASS 9 after:+minutes delay holds the job"
+  else
+    note_fail "case 9: dependent ran despite +1 minute delay"
+  fi
+else
+  note_fail "case 9: dependency never started"
+fi
+
+# Case 10: aftercorr — element-wise gating between two arrays.
+idV=$("$repo/sbatch" --parsable -a 1-2 -o "$w/ac-v-%A_%a.out" --wrap \
+  'if [ "$SLURM_ARRAY_TASK_ID" = 2 ]; then exit 5; fi; echo "V-$SLURM_ARRAY_TASK_ID"')
+sleep 1
+idW=$("$repo/sbatch" --parsable -a 1-2 -o "$w/ac-w-%A_%a.out" -d "aftercorr:$idV" --wrap \
+  'echo "W-$SLURM_ARRAY_TASK_ID"')
+# %A in the dependent array's pattern expands to ITS OWN master id (idW)
+if wait_grep "$w/ac-w-${idW}_1.out" "W-1" 30; then
+  if absent_after "$w/ac-w-${idW}_2.out" 6; then
+    pass=$((pass + 1)); echo "PASS 10 aftercorr gates per array element"
+  else
+    note_fail "case 10: aftercorr element 2 ran despite failed counterpart"
+  fi
+else
+  note_fail "case 10: aftercorr element 1 never ran"
+fi
+
+# Case 11: afterburstbuffer behaves like afterany here.
+idX=$("$repo/sbatch" --parsable -o "$w/bb-x-%j.out" --wrap 'sleep 2; echo "X-done"')
+idY=$("$repo/sbatch" --parsable -o "$w/bb-y-%j.out" -d "afterburstbuffer:$idX" --wrap 'echo "Y-ran"')
+if wait_grep "$w/bb-y-$idY.out" "Y-ran" 30; then
+  pass=$((pass + 1)); echo "PASS 11 afterburstbuffer satisfied on termination"
+else
+  note_fail "case 11: afterburstbuffer dependent never ran"
+fi
+
+echo "PASS $pass/11"
 if [ $fail -gt 0 ]; then
   exit 1
 fi

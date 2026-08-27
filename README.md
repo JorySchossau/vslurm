@@ -172,21 +172,41 @@ Filename pattern specifiers: `%j` this job's id, `%A` array master id,
 job expand to 4294967294 (SLURM's `NO_VAL`) and the job id respectively,
 matching real sbatch.
 
-Dependency types (comma groups, ALL must be satisfied): `afterok`,
-`afternotok`, `afterany`, `after`. Unknown types and non-integer ids warn
-at submit and the group is dropped. A dependency referencing an ID that
-was never allocated fails the job rather than pending forever; a
-dependency on an ID that finished long ago and was purged counts as
-satisfied. Two real-SLURM forms are unsupported and their group is dropped
-at submit, so the job runs **immediately** rather than waiting:
-`singleton`, and the optional/any-of `?` separator (`afterok:1?afterany:2`,
-including a trailing `?` on an id). Port such scripts to explicit id
-chains via `--parsable`. Like real SLURM (its default
-`kill_invalid_depend` path), a dependency that can never be satisfied —
-an `afterok` job whose dependency terminated not-completed (FAILED,
-CANCELLED, TIMEOUT), or an `afternotok` job whose dependency COMPLETED —
-cancels the dependent job: it leaves the queue as CANCELLED and never
-runs.
+Dependency lists use real SLURM's grammar: `<type:job_id[:job_id...]>`
+groups joined by `,` (ALL must be satisfied) or `?` (ANY one suffices,
+including ids inside one colon list — `afterok:20:21?afterany:23` means
+afterok:20 OR afterok:21 OR afterany:23). Only one separator kind may
+appear; mixing `,` and `?`, a doubled `?`, or a trailing `?` is a fatal
+submit error, exactly like real sbatch's `ESLURM_DEPENDENCY`.
+
+Supported types:
+
+- `after:job_id[+minutes]` — satisfied once the target has **started**
+  (or been cancelled); the optional `+minutes` adds a delay measured
+  from that start/cancellation. `after` never fails on the target's
+  termination state.
+- `afterany:job_id` — target terminated (any state). Default type.
+- `afterok:job_id` — target COMPLETED (exit 0).
+- `afternotok:job_id` — target FAILED / CANCELLED / TIMEOUT.
+- `aftercorr:job_id` — for array dependents, each element waits for the
+  **same task id** of the target array to complete with exit 0; if
+  either job is not an array it behaves as `afterok` on the target.
+- `afterburstbuffer:job_id` — like `afterany` (no burst buffers exist,
+  so stage-out is vacuously instant).
+- `singleton` — satisfied when no other job with the same **name** is
+  RUNNING or was submitted earlier and is still PENDING (single user,
+  so user matching is implicit).
+
+Unknown types and non-integer ids warn at submit and the group is
+dropped. A dependency referencing an ID that was never allocated fails
+the job rather than pending forever; a dependency on an ID that
+finished long ago and was purged counts as satisfied. Like real SLURM
+(its `kill_invalid_depend` path), a dependency that can never be
+satisfied — an `afterok` job whose dependency terminated not-completed
+(FAILED, CANCELLED, TIMEOUT), or an `afternotok` job whose dependency
+COMPLETED — cancels the dependent job: it leaves the queue as CANCELLED
+and never runs. With `?`, a failed branch simply drops out and the job
+is cancelled only when every branch has failed.
 
 ## The other tools, precisely
 
@@ -314,11 +334,13 @@ cancel, `%N` limit), cancellation, the CPU-budget cap and the
 `slurmctld --cpus` override, srun run/exit-code/files/cancel, and sacct
 field selection plus `-j`/`-s` filtering.
 
-`bash tests/depend.sh` exercises dependency semantics in isolation: an
-`afterok` job that runs after its dependency succeeds, and dependent jobs
-that are CANCELLED when their dependency can never be satisfied — both
+`bash tests/depend.sh` exercises dependency semantics in isolation
+(11 checks): `afterok` chaining and both `kill_invalid_depend`
 directions (`afterok` on a FAILED job, `afternotok` on a COMPLETED one),
-matching real SLURM's `kill_invalid_depend` behavior.
+the `?` any-of separator (release on first satisfied branch, cancel when
+all branches fail), mixed-separator rejection, `singleton`, `after:`
+firing on dependency start, the `after:id+minutes` delay, `aftercorr`
+per-element gating between arrays, and `afterburstbuffer`.
 
 `bash tests/install.sh` installs to a temp `PREFIX`, puts the binaries on
 `PATH` with `VSLURM_JOBS` unset, and verifies installed usage from

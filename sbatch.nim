@@ -41,7 +41,12 @@ proc applyOption(opt, val: string; o: var Opts; warned: var seq[string]) =
   of "error": o.errorFile = val
   of "chdir": o.chdir = val
   of "wrap": o.wrap = val
-  of "depend": o.dep = validateDep("sbatch", val, warned)
+  of "depend":
+    let sepErr = depSeparatorError("sbatch", val)
+    if sepErr.len > 0:
+      stderr.writeLine(sepErr)
+      quit(1)
+    o.dep = validateDep("sbatch", val, warned)
   of "array":
     o.arraySpec = val
   of "parsable":
