@@ -8,10 +8,10 @@ import posix except Time
 import vslurm_common except warn
 
 const shortMap = [('J', "job-name"), ('o', "output"), ('e', "error"),
-  ('t', "time"), ('d', "depend"), ('n', "ntasks"), ('c', "cpus-per-task"),
+  ('t', "time"), ('d', "dependency"), ('n', "ntasks"), ('c', "cpus-per-task"),
   ('D', "chdir"), ('a', "array"), ('A', "account")]
 
-const valueOpts = ["job-name", "output", "error", "depend", "ntasks",
+const valueOpts = ["job-name", "output", "error", "dependency", "depend", "ntasks",
   "cpus-per-task", "chdir", "wrap", "export", "time", "account", "partition",
   "qos", "nodes", "nodelist", "mem", "mem-per-cpu", "gres", "begin", "array",
   "cluster", "mail-user", "mail-type", "constraint", "reservation"]
@@ -41,7 +41,7 @@ proc applyOption(opt, val: string; o: var Opts; warned: var seq[string]) =
   of "error": o.errorFile = val
   of "chdir": o.chdir = val
   of "wrap": o.wrap = val
-  of "depend":
+  of "dependency", "depend":
     let sepErr = depSeparatorError("sbatch", val)
     if sepErr.len > 0:
       stderr.writeLine(sepErr)

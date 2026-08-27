@@ -43,7 +43,7 @@ SLURM:
 
 ```bash
 idA=$(./sbatch --parsable a.sb)          # prints just: 2
-./sbatch --depend=afterok:$idA b.sb      # B runs only if A exits 0
+./sbatch --dependency=afterok:$idA b.sb  # B runs only if A exits 0
 ```
 
 ## Components
@@ -142,7 +142,7 @@ covers that window.
 | `--job-name` | `-J` | name; `%x` refers to it |
 | `--output` | `-o` | default `slurm-%j.out` (`slurm-%A_%a.out` for arrays) |
 | `--error` | `-e` | empty = merge into output |
-| `--depend` | `-d` | see dependency types below |
+| `--dependency` | `-d` | see dependency types below |
 | `--time` | `-t` | minutes; `MM:SS`/`HH:MM:SS`/`D-HH:MM:SS` accepted |
 | `--ntasks` | `-n` | default 1; feeds the CPU budget only |
 | `--cpus-per-task` | `-c` | default 1; feeds the CPU budget only |

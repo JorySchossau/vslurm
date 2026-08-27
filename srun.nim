@@ -10,11 +10,11 @@ import vslurm_common except warn
 
 const shortMap = [('J', "job-name"), ('o', "output"), ('e', "error"),
   ('t', "time"), ('n', "ntasks"), ('c', "cpus-per-task"), ('D', "chdir"),
-  ('d', "depend"), ('v', "verbose"), ('l', "label"), ('u', "unbuffered"),
+  ('d', "dependency"), ('v', "verbose"), ('l', "label"), ('u', "unbuffered"),
   ('N', "nodes"), ('p', "partition"), ('A', "account"), ('q', "qos"),
   ('m', "mem"), ('W', "wait")]
 
-const valueOpts = ["job-name", "output", "error", "depend", "ntasks",
+const valueOpts = ["job-name", "output", "error", "dependency", "depend", "ntasks",
   "cpus-per-task", "chdir", "time", "export", "wait", "account", "partition",
   "qos", "nodes", "nodelist", "mem", "mem-per-cpu", "gres", "begin",
   "cluster", "mail-user", "mail-type", "constraint", "reservation",
@@ -38,7 +38,7 @@ proc applyOption(opt, val: string; o: var Opts; warned: var seq[string]) =
   of "output": o.output = val
   of "error": o.errorFile = val
   of "chdir": o.chdir = val
-  of "depend":
+  of "dependency", "depend":
     let sepErr = depSeparatorError("srun", val)
     if sepErr.len > 0:
       stderr.writeLine(sepErr)
