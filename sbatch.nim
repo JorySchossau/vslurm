@@ -2,10 +2,15 @@
 ## into the jobs DB under lock. Never launches anything — slurmctld owns
 ## execution. One submit maps to one row, or to N rows for a job array
 ## (a master + N-1 elements) sharing the master's job id.
+##
+## All user-facing problems are reported as vslurm_diag diagnostics:
+## spanned, explained, and accumulated so one submit shows every mistake
+## at once instead of the first one only.
 
 import os, strutils, times
 import posix except Time
 import vslurm_common except warn
+import vslurm_diag
 
 const shortMap = [('J', "job-name"), ('o', "output"), ('e', "error"),
   ('t', "time"), ('d', "dependency"), ('n', "ntasks"), ('c', "cpus-per-task"),
@@ -16,39 +21,108 @@ const valueOpts = ["job-name", "output", "error", "dependency", "depend", "ntask
   "qos", "nodes", "nodelist", "mem", "mem-per-cpu", "gres", "begin", "array",
   "cluster", "mail-user", "mail-type", "constraint", "reservation"]
 
+## every long option sbatch recognizes — the did-you-mean candidate set
+const knownOpts = @valueOpts & @["parsable", "exclusive", "share"]
+
+const unsupportedOpts = ["account", "partition", "qos", "nodes", "nodelist",
+  "mem", "mem-per-cpu", "gres", "exclusive", "share", "begin", "cluster",
+  "mail-user", "mail-type", "constraint", "reservation"]
+
 type
   Opts = object
     name: string
+    nameSpan: Span
+    namePath: string
     output: string
+    outSpan: Span
+    outPath2: string
     errorFile: string
+    errSpan: Span
+    errPath2: string
     dep: string
     chdir: string
     wrap: string
+    wrapSpan: Span
+    wrapPath: string
     minutes: int
     hasMinutes: bool
     ntasks: int
     cpus: int
     arraySpec: string
+    arraySpan: Span
+    arrayPath: string
+    arrayRaw: string
     script: string
     args: seq[string]
     parsable: bool
 
-proc applyOption(opt, val: string; o: var Opts; warned: var seq[string]) =
+  ## where an option came from: the script+span of a directive, or the CLI
+  Origin = object
+    path: string
+    flag: Span
+    val: Span
+
+proc cliOrigin(): Origin = Origin(path: "", flag: noSpan(), val: noSpan())
+
+proc loc(d: Diag; o: Origin; which: Span; label = ""): Diag =
+  ## attach a script location when one exists; CLI messages stay bare
+  if o.path.len > 0 and which.line > 0: d.with(o.path, which, label) else: d
+
+proc newWarns(diags: var seq[Diag]; o: Origin; warned: var seq[string];
+    mark: int; tool = "sbatch") =
+  ## Convert messages that shared helpers (validateDep, expandArraySpec)
+  ## appended since `mark` into spanned diagnostics; they arrive
+  ## pre-formatted as "<tool>: warning: <text>".
+  for m in warned[mark .. ^1]:
+    let pfx = tool & ": warning: "
+    let epfx = tool & ": error: "
+    if m.startsWith(pfx):
+      diags.add plain(sevWarning, tool, m[pfx.len .. ^1]).loc(o, o.val)
+    elif m.startsWith(epfx):
+      diags.add plain(sevError, tool, m[epfx.len .. ^1]).loc(o, o.val)
+    else:
+      diags.add plain(sevWarning, tool, m)
+  warned.setLen(mark)
+
+proc applyOption(opt, val: string; o: var Opts; diags: var seq[Diag];
+    warned: var seq[string]; org: Origin; raw = "") =
+  let dym = didYouMean(opt, knownOpts)
   case opt
   of "job-name":
     o.name = val
-  of "output": o.output = val
-  of "error": o.errorFile = val
+    o.nameSpan = org.val
+    o.namePath = org.path
+  of "output":
+    o.output = val
+    o.outSpan = org.val
+    o.outPath2 = org.path
+  of "error":
+    o.errorFile = val
+    o.errSpan = org.val
+    o.errPath2 = org.path
   of "chdir": o.chdir = val
-  of "wrap": o.wrap = val
+  of "wrap":
+    o.wrap = val
+    o.wrapSpan = org.val
+    o.wrapPath = org.path
   of "dependency", "depend":
     let sepErr = depSeparatorError("sbatch", val)
     if sepErr.len > 0:
-      stderr.writeLine(sepErr)
-      quit(1)
+      # keep the phrase tests grep for ("cannot be mixed")
+      let msg = sepErr.substr(len("sbatch: error: "))
+      diags.add plain(sevError, "sbatch", msg).loc(org, org.val,
+        "separators cannot be mixed").help(
+        "groups are joined by ',' (all must finish) or '?' (any one), never both",
+        "afterok:1,afterany:2")
+      return
+    let mark = warned.len
     o.dep = validateDep("sbatch", val, warned)
+    newWarns(diags, org, warned, mark)
   of "array":
     o.arraySpec = val
+    o.arraySpan = org.val
+    o.arrayPath = org.path
+    o.arrayRaw = raw
   of "parsable":
     o.parsable = true
   of "time":
@@ -57,43 +131,162 @@ proc applyOption(opt, val: string; o: var Opts; warned: var seq[string]) =
       o.minutes = m
       o.hasMinutes = true
     else:
-      warnOnce("sbatch: warning: invalid time limit '" & val & "' ignored", warned)
+      diags.add plain(sevWarning, "sbatch",
+        "invalid time limit '" & val & "' ignored").loc(org, org.val,
+        "not a valid time").note(
+        "a plain number is minutes; colons are HH:MM:SS or MM:SS").help(
+        "try '-t 5' for 5 minutes, '-t 2:00:00' for 2 hours",
+        if org.path.len > 0 and raw.len > 0:
+          "#SBATCH --time=" & (if val.len > 0 and val.allCharsInSet(Digits): val else: "5")
+        else: "")
   of "ntasks", "cpus-per-task":
     if val.len > 0 and val.allCharsInSet(Digits):
       if opt == "ntasks": o.ntasks = val.parseInt else: o.cpus = val.parseInt
     else:
-      warnOnce("sbatch: warning: invalid value '" & val & "' for '--" & opt &
-        "' ignored", warned)
+      diags.add plain(sevWarning, "sbatch",
+        "invalid value '" & val & "' for '--" & opt & "' ignored").loc(org,
+        org.val, "expected a whole number")
   of "export":
     if val != "ALL":
-      warnOnce("sbatch: warning: unsupported option '--export' ignored", warned)
-  of "account", "partition", "qos", "nodes", "nodelist", "mem", "mem-per-cpu",
-     "gres", "exclusive", "share", "begin", "cluster", "mail-user",
-     "mail-type", "constraint", "reservation":
-    warnOnce("sbatch: warning: unsupported option '" & displayOpt(opt) & "' ignored", warned)
+      diags.add plain(sevWarning, "sbatch",
+        "unsupported option '--export' ignored").loc(org, org.flag).note(
+        "only 'ALL' is meaningful here; the environment is always inherited")
+  of unsupportedOpts:
+    diags.add plain(sevWarning, "sbatch",
+      "unsupported option '" & displayOpt(opt) & "' ignored").loc(org,
+      org.flag, "no effect in vslurm").note(
+      "accepted for compatibility with real sbatch scripts")
   else:
-    warnOnce("sbatch: warning: unknown option '" & displayOpt(opt) & "' ignored", warned)
+    var d = plain(sevWarning, "sbatch",
+      "unknown option '" & displayOpt(opt) & "' ignored").loc(org, org.flag,
+      "unknown option")
+    if dym.len > 0:
+      d = d.help("did you mean '--" & dym & "'?",
+        if org.path.len > 0 and raw.len > 0:
+          let eq = raw.find('=')
+          if eq > 0: "#SBATCH --" & dym & raw[eq .. ^1]
+          elif raw.len >= 2 and raw[0] == '-' and raw[1] != '-':
+            "#SBATCH --" & dym & (if val.len > 0: "=" & val else: "")
+          else: "#SBATCH --" & dym
+        else: "")
+    diags.add d
 
-proc parseDirectives(path: string; o: var Opts; warned: var seq[string]) =
+proc parseDirectives(path: string; o: var Opts; diags: var seq[Diag];
+    warned: var seq[string]) =
   ## Apply #SBATCH directives from the top of the script until the first line
-  ## that is neither blank nor #-prefixed.
+  ## that is neither blank nor #-prefixed — and point at directives the user
+  ## probably meant to take effect but that real sbatch would silently skip.
   var f: File
   if not f.open(path): return
   defer: f.close()
+  var lineNo = 0
+  # line of the first command; #SBATCH lines below it are never read
+  var headerDone = -1
   for line in f.lines:
+    inc lineNo
     let s = line.strip()
     if s.len == 0: continue
-    if not s.startsWith("#"): break
+    if not s.startsWith("#"):
+      if headerDone < 0: headerDone = lineNo
+      continue
     if s.len > 7 and s[0 .. 6] == "#SBATCH" and s[7] in {' ', '\t'}:
       let rest = s[8 .. ^1].strip()
       if rest.len == 0: continue
-      let scanned = scanArgs(shellWords(rest), shortMap, valueOpts, false)
+      if headerDone > 0 and lineNo > headerDone:
+        # a directive below the first command: real sbatch never reads
+        # these, and neither do we — say so instead of staying silent
+        let col = line.find("#SBATCH") + 1
+        diags.add plain(sevWarning, "sbatch",
+          "this directive is ignored").with(path, at(lineNo, col, 7),
+          "after the script starts").note(
+          "sbatch reads #SBATCH lines only before the first command (line " &
+          $headerDone & ")").help("move it above the first non-comment line")
+        continue
+      let base = line.find(rest[0])
+      let scanned = scanDirective(spannedWords(rest, base), lineNo,
+        shortMap, valueOpts)
+      for p in scanned.positionals:
+        diags.add plain(sevWarning, "sbatch",
+          "unexpected argument '" & p.tok & "' in directive").with(path,
+          at(lineNo, p.col, p.rawLen), "not an option").note(
+          "#SBATCH lines take options only, like the sbatch command line")
       for c in scanned.calls:
-        applyOption(c.opt, c.val, o, warned)
+        let org = Origin(path: path, flag: c.optSpan, val: c.valSpan)
+        if not c.hasVal and c.opt in valueOpts and c.opt != "parsable":
+          diags.add plain(sevWarning, "sbatch",
+            "option '--" & c.opt & "' needs a value and was ignored").with(
+            path, c.optSpan, "value missing").help(
+            "write the value inline or as the next word",
+            "#SBATCH --" & c.opt & "=VALUE")
+          continue
+        applyOption(c.opt, c.val, o, diags, warned, org, c.raw)
+    elif s.len > 2 and didYouMean(s.strip(chars = {'#', ' ', '\t'}), ["SBATCH"]).len > 0:
+      # e.g. `#sbatch` / `#SBATCH--time=5`: looks like a directive but the
+      # spelling is off, so sbatch (and vslurm) silently treat it as a comment
+      let word = s.strip(chars = {'#', ' ', '\t'})
+      let col = line.find(word[0]) + 1
+      diags.add plain(sevWarning, "sbatch",
+        "line looks like a directive but is treated as a comment").with(path,
+        at(lineNo, col, word.len), "not '#SBATCH'").note(
+        "the directive prefix is case-sensitive and needs a space").help(
+        "spell it exactly '#SBATCH'",
+        "#SBATCH" & s[word.len + 1 .. ^1] & "  # <- was: " & s)
+
+proc specSpan(patVal, msg: string; base: Span): Span =
+  ## Locate the exact `%X` (or `%3X`) a specifier warning complains about,
+  ## so the carets underline the specifier itself, not the whole pattern.
+  let q0 = msg.find("'%")
+  if q0 < 0 or base.line == 0: return base
+  let letter = msg[q0 + 2]
+  var i = 0
+  while i < patVal.len:
+    if patVal[i] == '%':
+      var k = i + 1
+      var w = 0
+      while k < patVal.len and patVal[k] in {'0'..'9'} and w < 3:
+        inc k
+        inc w
+      if k < patVal.len and patVal[k] == letter:
+        return at(base.line, base.col + i, k - i + 1)
+      i = k
+    else:
+      inc i
+  base
+
+proc drainSpecWarns(warned: var seq[string]; o: Opts) =
+  ## Filename-pattern warnings, pointed at the field that produced them.
+  ## Warnings were collected name -> output -> error, in that order.
+  var fields: seq[tuple[val: string, sp: Span, pp: string]] = @[]
+  fields.add (o.name, o.nameSpan, o.namePath)
+  fields.add (o.output, o.outSpan, o.outPath2)
+  fields.add (o.errorFile, o.errSpan, o.errPath2)
+  var fi = 0
+  for m in warned:
+    let pfx = "sbatch: warning: "
+    let body = if m.startsWith(pfx): m[pfx.len .. ^1] else: m
+    var d = plain(sevWarning, "sbatch", body)
+    if fi < fields.len and "format specifier" in m:
+      let f = fields[fi]
+      inc fi
+      if f.sp.line > 0 and f.pp.len > 0:
+        d = d.with(f.pp, specSpan(f.val, m, f.sp),
+          "unsupported here").note(
+          "recognized: %j %A %a %x %t %N %u %J %%, optional width like %3j")
+    emit(d)
+  warned.setLen(0)
+
+proc emitAll(diags: seq[Diag]): bool =
+  ## print every diagnostic in collection order; true if any was fatal
+  var fatal = false
+  for d in diags:
+    emit(d)
+    if d.sev == sevError: fatal = true
+  fatal
 
 proc main() =
   var o = Opts(ntasks: 1, cpus: 1)
   var warned: seq[string] = @[]
+  var diags: seq[Diag] = @[]
   let scanned = scanArgs(commandLineParams(), shortMap, valueOpts, false)
   let positionals = scanned.positionals
 
@@ -102,18 +295,24 @@ proc main() =
     if positionals.len > 1: o.args = positionals[1 .. ^1]
 
   if o.script.len > 0 and not fileExists(o.script):
-    stderr.writeLine("sbatch: error: " & o.script & ": No such file or directory")
+    emit(plain(sevError, "sbatch", o.script & ": No such file or directory"))
     quit(1)
 
   # directives first, then the command line, which wins per real sbatch
   if o.script.len > 0:
-    parseDirectives(o.script, o, warned)
+    parseDirectives(o.script, o, diags, warned)
   for c in scanned.calls:
-    applyOption(c.opt, c.val, o, warned)
+    applyOption(c.opt, c.val, o, diags, warned, cliOrigin())
 
   if o.wrap.len > 0 and o.script.len > 0:
-    stderr.writeLine("sbatch: error: --wrap is incompatible with a script")
+    var d = plain(sevError, "sbatch", "--wrap is incompatible with a script")
+    if o.wrapPath.len > 0:
+      d = d.with(o.wrapPath, o.wrapSpan, "--wrap given here").note(
+        "the script is " & o.script)
+    diags.add d
+  if emitAll(diags):
     quit(1)
+
   if o.script.len == 0 and o.wrap.len == 0:
     stderr.writeLine("Usage: sbatch [options] <script> [args...] | sbatch --wrap <command>")
     quit(1)
@@ -133,12 +332,31 @@ proc main() =
   var arrayLimit = -1
   var arrayed = false
   if o.arraySpec.len > 0:
+    let mark = warned.len
     let ex = expandArraySpec(o.arraySpec, warned)
     tasks = ex.ids
     arrayLimit = ex.limit
-    if tasks.len == 0:
-      stderr.writeLine("sbatch: error: invalid --array value '" & o.arraySpec & "'")
-      quit(1)
+    # expandArraySpec's messages arrive pre-formatted; re-render them
+    # pointing at the value, fatal when no index survived
+    # short flags stay short (`-a=1-10` is wrong); only long ones take '='
+    let eq = if o.arrayRaw.startsWith("--"): "=" else: " "
+    for m in warned[mark .. ^1]:
+      let pfx = "sbatch: error: "
+      var d = plain(if tasks.len == 0: sevError else: sevWarning, "sbatch",
+        if m.startsWith(pfx): m[pfx.len .. ^1] else: m)
+      if o.arrayPath.len > 0 and o.arraySpan.line > 0:
+        d = d.with(o.arrayPath, o.arraySpan, "in --array")
+      var fix = ""
+      if o.arrayPath.len > 0:
+        fix = "#SBATCH " & (if o.arrayRaw.len > 0 and
+          o.arrayRaw.startsWith("-"): o.arrayRaw else: "--array") & eq & "1-10"
+      elif o.arrayRaw.startsWith("--"):
+        fix = o.arrayRaw & "=1-10"
+      d = d.help("ranges 1-10, lists 1,3,7, optional %N concurrency limit", fix)
+      diags.add d
+    warned.setLen(mark)
+    discard emitAll(diags)
+    if tasks.len == 0: quit(1)
     arrayed = true
 
   let db = dbPath()
@@ -185,6 +403,7 @@ proc main() =
         arrayLimit: if arrayed: arrayLimit else: -1,
       )
     saveJobs(f, jobs)
+    drainSpecWarns(warned, o)
     if o.parsable: echo masterId else: echo "Submitted batch job ", masterId
   finally:
     closeDb(f)

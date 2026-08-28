@@ -165,6 +165,35 @@ constraint reservation`) produce `sbatch: warning: unsupported option ...
 ignored` on stderr and are otherwise ignored — never fatal. Truly unknown
 options warn the same way and do **not** consume a following value token.
 
+### Diagnostics
+
+Problems in an sb file are reported rustc-style: the offending token is
+underlined in its line, a `note` explains why the parser cares, and a
+`help` offers the fix (often a corrected line to paste back). Misspelled
+options get a did-you-mean, directives below the first command line are
+flagged as ignored rather than silently skipped, and near-miss directive
+prefixes (`#sbatch`) are called out. Diagnostics accumulate — one submit
+shows every fixable mistake, and warnings never block submission.
+
+```text
+$ sbatch job.sb
+sbatch: warning: unknown option '--timout' ignored
+  --> job.sb:2:9
+   |
+2 | #SBATCH --timout=5
+   |         ^^^^^^^^ unknown option
+help: did you mean '--time'?
+   |
+2 | #SBATCH --time=5
+   |         ^^^^^^^
+Submitted batch job 7
+```
+
+Errors keep real sbatch's one-line form for scripted use (`sbatch:
+error: <script>: No such file or directory`), gaining a span only when
+the failing value lives in the script. Color follows the tty and
+respects `NO_COLOR`.
+
 Filename pattern specifiers: `%j` this job's id, `%A` array master id,
 `%a` task id, `%x` job name, `%t` task rank, `%N` hostname, `%u` user,
 `%J` `jobid.stepid`, `%%` literal percent, with optional zero-pad width
@@ -341,6 +370,12 @@ the `?` any-of separator (release on first satisfied branch, cancel when
 all branches fail), mixed-separator rejection, `singleton`, `after:`
 firing on dependency start, the `after:id+minutes` delay, `aftercorr`
 per-element gating between arrays, and `afterburstbuffer`.
+
+`bash tests/diag.sh` verifies the diagnostics themselves (27 checks):
+spans and carets point at the exact token, CLI-origin messages carry no
+span, late/lowercase directives are flagged with a fix, mixed dependency
+separators and invalid arrays are fatal with help text, warnings
+accumulate without blocking the submit, clean scripts stay silent.
 
 `bash tests/install.sh` installs to a temp `PREFIX`, puts the binaries on
 `PATH` with `VSLURM_JOBS` unset, and verifies installed usage from

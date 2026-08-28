@@ -5,7 +5,7 @@ all: squeue sbatch slurmctld scancel srun sacct
 squeue: squeue.nim vslurm_common.nim
 	nim c $(NIMFLAGS) -o:$@ $<
 
-sbatch: sbatch.nim vslurm_common.nim
+sbatch: sbatch.nim vslurm_common.nim vslurm_diag.nim
 	nim c $(NIMFLAGS) -o:$@ $<
 
 slurmctld: slurmctld.nim vslurm_common.nim
@@ -14,7 +14,7 @@ slurmctld: slurmctld.nim vslurm_common.nim
 scancel: scancel.nim vslurm_common.nim
 	nim c $(NIMFLAGS) -o:$@ $<
 
-srun: srun.nim vslurm_common.nim
+srun: srun.nim vslurm_common.nim vslurm_diag.nim
 	nim c $(NIMFLAGS) -o:$@ $<
 
 sacct: sacct.nim vslurm_common.nim

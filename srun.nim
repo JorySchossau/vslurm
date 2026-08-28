@@ -7,6 +7,7 @@
 import os, strutils, times
 import posix except Time
 import vslurm_common except warn
+import vslurm_diag
 
 const shortMap = [('J', "job-name"), ('o', "output"), ('e', "error"),
   ('t', "time"), ('n', "ntasks"), ('c', "cpus-per-task"), ('D', "chdir"),
@@ -170,6 +171,7 @@ proc main() =
   let scanned = scanArgs(commandLineParams(), shortMap, valueOpts, true)
   for c in scanned.calls:
     applyOption(c.opt, c.val, o, warned)
+  drainPlain(warned)
   let cmd = scanned.positionals
   if cmd.len == 0:
     stderr.writeLine("Usage: srun [options] <command> [args...]")
@@ -191,9 +193,10 @@ proc main() =
   let id =
     try:
       let id = nextJobId(db)
-      var warned2 = warned
+      var warned2: seq[string] = @[]
       let outPath = expandSpec(o.output, id, id, -1, o.name, warned2)
       let errPath = expandSpec(o.errorFile, id, id, -1, o.name, warned2)
+      drainPlain(warned2)
       # Empty the files up front (slurmctld re-truncates with `>` at launch) so
       # streaming can start at offset 0 with no stale bytes from a wiped DB.
       for p in [resolvePath(o.chdir, outPath), resolvePath(o.chdir, errPath)]:
