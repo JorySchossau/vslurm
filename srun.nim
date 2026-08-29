@@ -190,6 +190,7 @@ proc main() =
   if not openDb(db, f):
     stderr.writeLine("srun: error: cannot open " & db)
     quit(1)
+  let envSnap = snapshotEnv()
   let id =
     try:
       let id = nextJobId(db)
@@ -223,6 +224,7 @@ proc main() =
         arrayId: -1,
         arrayTask: -1,
         arrayLimit: -1,
+        envData: envSnap,
       )
       saveJobs(f, jobs)
       id

@@ -8,7 +8,9 @@ repo=$(pwd)
 make -s all
 w=$(mktemp -d)
 export VSLURM_JOBS=$w/jobs.csv
-./slurmctld > "$w/slurmctld.log" 2>&1 &
+# DAEMON_ONLY exists only in the daemon's env; test 12 asserts jobs don't
+# inherit it (they carry the submitter's snapshot instead).
+DAEMON_ONLY=should_not_leak ./slurmctld > "$w/slurmctld.log" 2>&1 &
 sched_pid=$!
 trap 'kill $sched_pid 2>/dev/null || true; wait $sched_pid 2>/dev/null || true; rm -rf "$w"' EXIT
 
@@ -305,7 +307,7 @@ nlow=$("$repo/squeue" -h | awk '$3 == "R"' | wc -l)
 kill $sched_pid 2>/dev/null || true
 wait $sched_pid 2>/dev/null || true
 export VSLURM_JOBS=$w/jobs.csv
-"$repo/slurmctld" > "$w/slurmctld.log" 2>&1 &
+DAEMON_ONLY=should_not_leak "$repo/slurmctld" > "$w/slurmctld.log" 2>&1 &
 sched_pid=$!
 if [ "$nlow" -eq 2 ]; then
   pass=$((pass + 1)); echo "PASS 7b slurmctld --cpus 2 caps at 2"
@@ -347,6 +349,27 @@ else
   note_fail "test 10: srun files or sacct filters wrong"
 fi
 
+# Test 12: jobs inherit the submitter's environment (not the daemon's),
+# and ambient SLURM_*/SBATCH_* keys from the submitting shell are replaced
+# by the job's own values.
+cat > "$w/env.sb" <<EOF
+#!/bin/sh
+echo "SUBMITVAR=[\$SUBMIT_VAR]"
+echo "DAEMONVAR=[\$DAEMON_ONLY]"
+echo "STALE=\$SLURM_JOB_ID"
+EOF
+SUBMIT_VAR=from_submitter SLURM_JOB_ID=999 \
+  env -u DAEMON_ONLY "$repo/sbatch" "$w/env.sb" > /dev/null
+id12=$(tail -1 jobs.csv | cut -d, -f1)
+if wait_state "$id12" CD 20 && \
+   grep -q "SUBMITVAR=\[from_submitter\]" "$w/slurm-$id12.out" && \
+   grep -q "DAEMONVAR=\[\]" "$w/slurm-$id12.out" && \
+   grep -q "STALE=$id12" "$w/slurm-$id12.out"; then
+  pass=$((pass + 1)); echo "PASS 12 submitter env snapshot"
+else
+  note_fail "test 12: job env is not the submitter's snapshot"
+fi
+
 # Test 11: Ctrl-C on srun cancels the job.
 "$repo/srun" sleep 300 > /dev/null 2>&1 &
 srunpid=$!
@@ -361,7 +384,7 @@ else
   note_fail "test 11: srun cancel failed (rc=$rc11)"
 fi
 
-echo "PASS $pass/18"
+echo "PASS $pass/19"
 if [ $fail -gt 0 ]; then
   exit 1
 fi

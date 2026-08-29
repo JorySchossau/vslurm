@@ -41,8 +41,14 @@ proc pidAlive(pid: int): bool =
   result = posix.errno == posix.EPERM
 
 proc buildEnv(j: Job; jobs: seq[Job]): StringTableRef =
+  ## Each job's shell session is built from the submitter's snapshot
+  ## (captured by sbatch/srun at submit time), not the daemon's env — so
+  ## `FOO=1 sbatch job.sb` reaches the job. Ambient SLURM_*/SBATCH_* keys
+  ## are dropped first: ours below are the only SLURM vars a job sees,
+  ## even when the snapshot was taken from inside another job.
   result = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
+  for k, v in parseEnvSnapshot(j.envData).pairs:
+    if k.startsWith("SLURM_") or k.startsWith("SBATCH_"): continue
     result[k] = v
   result["SLURM_JOB_ID"] = $j.id
   result["SLURM_JOB_NAME"] = j.name

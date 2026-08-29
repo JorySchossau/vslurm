@@ -3,13 +3,13 @@
 ## sequence-based job-ID allocation. Plus small shared helpers (shell word
 ## splitting, filename-pattern expansion) used by several tools.
 
-import os, sequtils, strutils, times
+import os, sequtils, strutils, strtabs, times
 import posix except Time
 
 const dbHeader* =
-  "jobid,state,name,submit,start,end,pid,exitcode,minutes,ntasks,cpus,dep,output,error,chdir,script,args,wrap,arrayid,arraytask,arraylimit"
+  "jobid,state,name,submit,start,end,pid,exitcode,minutes,ntasks,cpus,dep,output,error,chdir,script,args,wrap,arrayid,arraytask,arraylimit,env"
 
-const dbColumns* = 21
+const dbColumns* = 22
 
 const
   stPending* = "PENDING"
@@ -54,6 +54,9 @@ type
     arrayId*: int
     arrayTask*: int
     arrayLimit*: int
+    ## Submit-time snapshot of the user's environment, replayed verbatim
+    ## into the job's shell session (minus any SLURM_*/SBATCH_* keys).
+    envData*: string
 
 proc isArrayJob*(j: Job): bool = j.arrayId > 0
 ## A job array is one non-executing master row (arrayTask -1) plus one row
@@ -117,7 +120,7 @@ proc toRow*(j: Job): string =
     csvEscape(j.errorFile) & "," & csvEscape(j.chdir) & "," &
     csvEscape(j.script) & "," & csvEscape(j.args) & "," & csvEscape(j.wrap) & "," &
     csvEscape(s(j.arrayId)) & "," & csvEscape(s(j.arrayTask)) & "," &
-    csvEscape(s(j.arrayLimit))
+    csvEscape(s(j.arrayLimit)) & "," & csvEscape(j.envData)
 
 proc pi(s: string): int =
   if s.len == 0: -1 else: s.parseInt
@@ -147,6 +150,7 @@ proc parseJob*(cells: seq[string]): Job =
     arrayId: pi(cells[18]),
     arrayTask: pi(cells[19]),
     arrayLimit: pi(cells[20]),
+    envData: if cells.len > 21: cells[21] else: "",
   )
 
 proc dbPath*(): string =
@@ -198,7 +202,10 @@ proc loadJobs*(f: File): seq[Job] =
       carrying = true
       continue
     carrying = false
-    let cells = csvSplit(rec)
+    var cells = csvSplit(rec)
+    # Older rows (pre-env-column schema) are padded with empty cells so a
+    # schema bump doesn't silently discard every pre-existing job.
+    if cells.len < dbColumns: cells.setLen(dbColumns)
     if cells.len != dbColumns: continue
     if cells[0].len == 0 or cells[0][0] notin {'0'..'9'}: continue
     result.add parseJob(cells)
@@ -273,6 +280,35 @@ proc resolvePath*(chdir, p: string): string =
   ## Relative output/error/script paths belong to the job's working
   ## directory, which is stored absolute at submit time.
   if p.isAbsolute: p else: chdir / p
+
+# ---------------------------------------------------------------------------
+# Submit-time environment snapshot: persisted on the row, replayed into each
+# job's shell session so jobs inherit the submitter's env, not the daemon's.
+
+proc snapshotEnv*(): string =
+  ## `name\0value\0` pairs — NUL can't occur in a POSIX env string, so no
+  ## quoting is needed beyond the CSV layer's own escaping.
+  result = ""
+  for k, v in envPairs():
+    result.add k
+    result.add '\0'
+    result.add v
+    result.add '\0'
+
+proc parseEnvSnapshot*(s: string): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  var i = 0
+  while i < s.len:
+    let eq = s.find('\0', i)
+    if eq < 0: break
+    let k = s[i ..< eq]
+    var v = ""
+    var j = eq + 1
+    while j < s.len and s[j] != '\0':
+      v.add s[j]
+      inc j
+    result[k] = v
+    i = j + 1
 
 proc allocatedMaxId*(db: string): int =
   ## Highest job ID ever allocated, per the monotonic sequence file.
@@ -352,8 +388,10 @@ proc currentUser*(): string =
 # sbatch --array / -a and --depend spec parsing.
 
 proc warn*(msg: string; warned: var seq[string]) =
+  ## Collect only — the caller decides when (and how richly) to print,
+  ## so tools that track spans can attach them before anything reaches
+  ## stderr. See vslurm_diag.drainPlain.
   warned.add msg
-  stderr.writeLine(msg)
 
 proc parseJobSpec*(s: string): tuple[job: int, task: int] =
   ## `123` -> (123, -1); `123_4` -> (123, 4). Invalid input -> (0, -1).
@@ -565,7 +603,6 @@ proc scanArgs*(tokens: seq[string];
 proc warnOnce*(msg: string; warned: var seq[string]) =
   if msg notin warned:
     warned.add msg
-    stderr.writeLine(msg)
 
 proc displayOpt*(name: string): string =
   if name.len == 1: "-" & name else: "--" & name

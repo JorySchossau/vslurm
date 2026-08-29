@@ -267,24 +267,33 @@ is cancelled only when every branch has failed.
 
 ## Environment exported to jobs
 
-`SLURM_JOB_ID`, `SLURM_JOB_NAME`, `SLURM_SUBMIT_DIR`, `SLURM_NTASKS`,
-`SLURM_CPUS_PER_TASK`, `SLURM_JOB_DEPENDENCY` when set, plus
-`SLURM_ARRAY_JOB_ID`/`SLURM_ARRAY_TASK_ID`/`SLURM_ARRAY_TASK_COUNT` for
-array elements.
+Each job's shell session is rebuilt from a snapshot of the *submitting*
+shell's environment, taken by sbatch/srun at submit time and stored on the
+job row — so `FOO=1 sbatch job.sb` puts `FOO` in the job, and a variable
+that exists only in the daemon's environment does not leak in. Ambient
+`SLURM_*`/`SBATCH_*` keys in the snapshot are dropped first, then vslurm
+sets its own: `SLURM_JOB_ID`, `SLURM_JOB_NAME`, `SLURM_SUBMIT_DIR`,
+`SLURM_NTASKS`, `SLURM_CPUS_PER_TASK`, `SLURM_JOB_DEPENDENCY` when set,
+plus `SLURM_ARRAY_JOB_ID`/`SLURM_ARRAY_TASK_ID`/`SLURM_ARRAY_TASK_COUNT`
+for array elements. A job submitted from inside another job therefore
+sees only its own SLURM variables.
 
-**Caveat:** jobs inherit the *scheduler's* environment, not the
-submitter's. `FOO=1 sbatch job.sb` does not put `FOO` in the job —
-`--export` has no effect. To get variables into jobs, set them in the sb
-script or start slurmctld with the environment you want.
+`--export` remains accepted-but-inert: `ALL` describes the behavior above
+(the default), other values warn, and there is no per-variable export
+filtering.
 
 ## DB schema
 
-21 columns, header row always present:
+22 columns, header row always present:
 `jobid,state,name,submit,start,end,pid,exitcode,minutes,ntasks,cpus,dep,
-output,error,chdir,script,args,wrap,arrayid,arraytask,arraylimit`.
+output,error,chdir,script,args,wrap,arrayid,arraytask,arraylimit,env`.
 `script` and `args` store the submitted script and its argument list
-(quoted when needed); `wrap` holds a `--wrap` payload instead. Empty int
-cells (pid, exitcode, minutes, arrayid, ...) read back as unset.
+(quoted when needed); `wrap` holds a `--wrap` payload instead; `env` holds
+the submit-time environment snapshot (NUL-separated `name\0value\0`
+pairs, replayed into each job's shell session). Empty int cells (pid,
+exitcode, minutes, arrayid, ...) read back as unset. Rows with fewer
+cells than the current schema (from older vslurm versions) are padded
+with empty cells on read, so schema growth never discards history.
 Cells containing `,`/`"`/newlines are double-quote escaped by the shared
 reader/writer.
 
@@ -355,13 +364,14 @@ accounting.
 
 `make check` type-checks every tool; `make` builds all six binaries.
 
-`bash tests/e2e.sh` builds everything and runs 18 acceptance checks in a
+`bash tests/e2e.sh` builds everything and runs 19 acceptance checks in a
 temp dir: basic submit/run/output/exit-code, directive-driven naming,
 dependency chains, failure + `afternotok`/`afterok` gating, timeouts,
 arrays (files, env, squeue filters, master deps, element deps, element
 cancel, `%N` limit), cancellation, the CPU-budget cap and the
-`slurmctld --cpus` override, srun run/exit-code/files/cancel, and sacct
-field selection plus `-j`/`-s` filtering.
+`slurmctld --cpus` override, the submitter-env snapshot (including
+no-daemon-leak and stale-`SLURM_*` stripping), srun run/exit-code/files/
+cancel, and sacct field selection plus `-j`/`-s` filtering.
 
 `bash tests/depend.sh` exercises dependency semantics in isolation
 (11 checks): `afterok` chaining and both `kill_invalid_depend`

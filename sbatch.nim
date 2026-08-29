@@ -365,6 +365,7 @@ proc main() =
     stderr.writeLine("sbatch: error: cannot open " & db)
     quit(1)
   let argsStr = shellJoin(o.args)
+  let envSnap = snapshotEnv()
   try:
     let masterId = nextJobId(db)
     var jobs = loadJobs(f)
@@ -401,6 +402,7 @@ proc main() =
         arrayId: if arrayed: masterId else: -1,
         arrayTask: task,
         arrayLimit: if arrayed: arrayLimit else: -1,
+        envData: envSnap,
       )
     saveJobs(f, jobs)
     drainSpecWarns(warned, o)
