@@ -370,6 +370,43 @@ else
   note_fail "test 12: job env is not the submitter's snapshot"
 fi
 
+# Test 13: submit-side input env vars — sbatch reads SBATCH_* between
+# directives and the CLI (env wins over directives, CLI over env), sets
+# the array MIN/MAX/STEP/COUNT output vars, and warns on unsupported ones.
+cat > "$w/inenv.sb" <<'EOF'
+#SBATCH --job-name=fromdirective
+#SBATCH -o unused-%j.out
+echo "task=$SLURM_ARRAY_TASK_ID min=$SLURM_ARRAY_TASK_MIN max=$SLURM_ARRAY_TASK_MAX step=$SLURM_ARRAY_TASK_STEP count=$SLURM_ARRAY_TASK_COUNT"
+echo "alias=$SLURM_JOBID nprocs=$SLURM_NPROCS nnodes=$SLURM_NNODES cpuson=$SLURM_CPUS_ON_NODE tpn=$SLURM_TASKS_PER_NODE proc=$SLURM_PROCID gtids=$SLURM_GTIDS"
+EOF
+id13=$(SBATCH_JOB_NAME=envname SBATCH_OUTPUT="$w/env-out-%A_%a.out" \
+  SBATCH_ARRAY_INX=1-5:2 SBATCH_TIMELIMIT=1 SBATCH_QOS=high \
+  "$repo/sbatch" --parsable "$w/inenv.sb" 2> "$w/inenv.err")
+ok13=1
+name13=$(awk -F, -v j="$id13" '$1==j{print $3}' jobs.csv)
+mins13=$(awk -F, -v j="$id13" '$1==j{print $9}' jobs.csv)
+out13="$w/env-out-${id13}_1.out"
+[ "$name13" = "envname" ] || ok13=0                     # env beats directive
+[ "$mins13" = "1" ] || ok13=0
+wait_state "${id13}_1" CD 20 || ok13=0
+grep -q "task=1 min=1 max=5 step=2 count=3" "$out13" || ok13=0
+# SLURM_JOBID inside an element is its own row id (documented divergence
+grep -q " nprocs=1 nnodes=1 cpuson=1 tpn=1 proc=0 gtids=0" "$out13" || ok13=0
+grep -q "unsupported environment variable 'SBATCH_QOS' ignored" "$w/inenv.err" || ok13=0
+# CLI still beats the environment
+id13b=$(SBATCH_JOB_NAME=envname "$repo/sbatch" --parsable -J cliname "$w/inenv.sb")
+[ "$(awk -F, -v j="$id13b" '$1==j{print $3}' jobs.csv)" = "cliname" ] || ok13=0
+# srun input vars: SLURM_JOB_NAME/SLURM_NTASKS apply, -n overrides
+SLURM_JOB_NAME=srunenv SLURM_NTASKS=2 "$repo/srun" sh -c 'echo "srunname=$SLURM_JOB_NAME n=$SLURM_NTASKS"' > "$w/srun-env.out" 2>/dev/null
+grep -q "srunname=srunenv n=2" "$w/srun-env.out" || ok13=0
+SLURM_NTASKS=5 "$repo/srun" -n 3 sh -c 'echo "n=$SLURM_NTASKS"' > "$w/srun-env2.out" 2>/dev/null
+grep -q "^n=3" "$w/srun-env2.out" || ok13=0
+if [ $ok13 -eq 1 ]; then
+  pass=$((pass + 1)); echo "PASS 13 submit-side input env vars"
+else
+  note_fail "test 13: input env vars not respected"
+fi
+
 # Test 11: Ctrl-C on srun cancels the job.
 "$repo/srun" sleep 300 > /dev/null 2>&1 &
 srunpid=$!
@@ -384,7 +421,7 @@ else
   note_fail "test 11: srun cancel failed (rc=$rc11)"
 fi
 
-echo "PASS $pass/19"
+echo "PASS $pass/20"
 if [ $fail -gt 0 ]; then
   exit 1
 fi

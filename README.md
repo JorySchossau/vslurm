@@ -153,8 +153,9 @@ covers that window.
 | `--export` | | accepted; `ALL` is silent, other values warn |
 
 Directives (`#SBATCH ...`) are read from the top of the script until the
-first line that is neither blank nor `#`-prefixed; command-line options
-are applied afterwards and win, per real sbatch. Script arguments after
+first line that is neither blank nor `#`-prefixed; the layering follows
+real sbatch — **directives, then `SBATCH_*` environment variables, then
+the command line**, each overriding the last (see below). Script arguments after
 the script path are passed through to the job. `--wrap` plus a script
 file is an error; neither is a usage error. A nonexistent script is an
 error, exactly like sbatch.
@@ -274,13 +275,50 @@ that exists only in the daemon's environment does not leak in. Ambient
 `SLURM_*`/`SBATCH_*` keys in the snapshot are dropped first, then vslurm
 sets its own: `SLURM_JOB_ID`, `SLURM_JOB_NAME`, `SLURM_SUBMIT_DIR`,
 `SLURM_NTASKS`, `SLURM_CPUS_PER_TASK`, `SLURM_JOB_DEPENDENCY` when set,
-plus `SLURM_ARRAY_JOB_ID`/`SLURM_ARRAY_TASK_ID`/`SLURM_ARRAY_TASK_COUNT`
-for array elements. A job submitted from inside another job therefore
-sees only its own SLURM variables.
+plus the back-compat and single-node aliases (`SLURM_JOBID`,
+`SLURM_NPROCS`, `SLURM_JOB_NODELIST`/`SLURM_NODELIST`,
+`SLURM_JOB_NUM_NODES`/`SLURM_NNODES`, `SLURM_CPUS_ON_NODE`,
+`SLURMD_NODENAME`, `SLURM_SUBMIT_HOST`, `SLURM_TASKS_PER_NODE`, and
+`SLURM_PROCID`/`SLURM_LOCALID`/`SLURM_NODEID`/`SLURM_GTIDS` all `0`,
+plus `SLURM_JOB_START_TIME` and — when a time limit is set —
+`SLURM_JOB_END_TIME`). Array elements additionally get
+`SLURM_ARRAY_JOB_ID`/`SLURM_ARRAY_TASK_ID`/`SLURM_ARRAY_TASK_COUNT` and
+`SLURM_ARRAY_TASK_MIN`/`_MAX` (and `_STEP`, only while the surviving
+element ids are evenly spaced — `1,3,5` gets `2`, `1,2,5` gets nothing).
+A job submitted from inside another job therefore sees only its own
+SLURM variables. GPU, account/QOS/partition and memory variables are
+never set: the options that request them don't exist here.
 
 `--export` remains accepted-but-inert: `ALL` describes the behavior above
 (the default), other values warn, and there is no per-variable export
 filtering.
+
+### Input environment variables
+
+Real sbatch/srun read option values from the environment before the
+command line is parsed, and vslurm now does too — same precedence:
+directive < environment < command line.
+
+sbatch applies `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`,
+`SBATCH_TIMELIMIT`, `SBATCH_ARRAY_INX` and `SBATCH_EXPORT` exactly as if
+the matching option had been given; invalid values warn the same way the
+option would. (The README's `--export` row above describes `SBATCH_EXPORT`'s
+behavior too.) srun applies `SLURM_JOB_NAME`, `SRUN_OUTPUT`, `SRUN_ERROR`,
+`SLURM_DEPENDENCY`, `SLURM_TIMELIMIT`, `SLURM_NTASKS`/`SLURM_NPROCS`,
+`SLURM_CPUS_PER_TASK`, `SLURM_REMOTE_CWD` and `SLURM_EXPORT_ENV` (and,
+like the man page's within-an-allocation rules, ignores
+`SLURM_JOB_NAME`/`SLURM_DEPENDENCY` when invoked from inside a job).
+
+Any *other* input variable the man pages document — `SBATCH_PARTITION`,
+`SBATCH_ACCOUNT`, `SBATCH_GRES`, `SBATCH_MEM_PER_CPU`, `SLURM_CONF`,
+`SLURM_CLUSTERS`, … — prints
+`sbatch: warning: unsupported environment variable 'SBATCH_QOS' ignored`
+style output once and is dropped (a deliberate divergence — real sbatch
+ignores unrecognized variables silently); undocumented keys (including `PMI_*`)
+pass through silently and ride along in the submit-time snapshot, since
+they may mean something to the job itself. `SLURM_UMASK` and
+`SLURM_EXIT_ERROR` are silently ignored — there is no umask control and
+no configurable tool error exit code.
 
 ## DB schema
 
@@ -348,7 +386,11 @@ accounting.
   `SLURM_ARRAY_JOB_ID`.
 - `SLURM_ARRAY_TASK_COUNT` reflects the number of array elements currently
   in the DB for the master, not the submitted count (purged elements no
-  longer count).
+  longer count); `SLURM_ARRAY_TASK_MIN`/`_MAX`/`_STEP` describe that same
+  surviving set.
+- Unsupported-but-documented input environment variables warn instead of
+  being silently dropped; undocumented `SBATCH_*`/`SLURM_*` keys are
+  ignored without a warning (real sbatch ignores everything silently).
 - `--parsable` prints the bare job id only (no `;cluster` suffix — there
   is no federation); for arrays it prints the master id. It is
   sbatch-only; `srun` blocks and returns the exit code, so it has no id to
@@ -364,14 +406,16 @@ accounting.
 
 `make check` type-checks every tool; `make` builds all six binaries.
 
-`bash tests/e2e.sh` builds everything and runs 19 acceptance checks in a
+`bash tests/e2e.sh` builds everything and runs 20 acceptance checks in a
 temp dir: basic submit/run/output/exit-code, directive-driven naming,
 dependency chains, failure + `afternotok`/`afterok` gating, timeouts,
 arrays (files, env, squeue filters, master deps, element deps, element
 cancel, `%N` limit), cancellation, the CPU-budget cap and the
 `slurmctld --cpus` override, the submitter-env snapshot (including
-no-daemon-leak and stale-`SLURM_*` stripping), srun run/exit-code/files/
-cancel, and sacct field selection plus `-j`/`-s` filtering.
+no-daemon-leak and stale-`SLURM_*` stripping), submit-side input env
+vars (sbatch and srun, precedence, array MIN/MAX/STEP, unsupported
+warnings), srun run/exit-code/files/cancel, and sacct field selection
+plus `-j`/`-s` filtering.
 
 `bash tests/depend.sh` exercises dependency semantics in isolation
 (11 checks): `afterok` chaining and both `kill_invalid_depend`

@@ -171,6 +171,57 @@ proc applyOption(opt, val: string; o: var Opts; diags: var seq[Diag];
         else: "")
     diags.add d
 
+## Input environment variables, per real sbatch's precedence
+## directives < environment < command line. Supported keys route through
+## the same applyOption as directives (so invalid values warn the same
+## way); documented-but-unsupported ones warn like unsupported options.
+## Unrecognized SBATCH_* keys stay silent, like real sbatch.
+const envOptPairs = @[
+  ("SBATCH_JOB_NAME", "job-name"),
+  ("SBATCH_OUTPUT", "output"),
+  ("SBATCH_ERROR", "error"),
+  ("SBATCH_TIMELIMIT", "time"),
+  ("SBATCH_ARRAY_INX", "array"),
+  ("SBATCH_EXPORT", "export"),
+]
+
+## every other input variable the sbatch man page documents, none of
+## which map to an option vslurm implements (SLURM_UMASK is honored by
+## slurmctld at launch instead; SLURM_EXIT_ERROR is silently ignored)
+const envUnsupported = ["SBATCH_ACCOUNT", "SBATCH_ACCTG_FREQ", "SBATCH_BATCH",
+  "SBATCH_CLUSTERS", "SLURM_CLUSTERS", "SBATCH_CONSTRAINT",
+  "SBATCH_CONTAINER", "SBATCH_CONTAINER_ID", "SBATCH_CONTAINER_TYPE",
+  "SBATCH_CORE_SPEC", "SBATCH_CPUS_PER_GPU", "SBATCH_DEBUG",
+  "SBATCH_DELAY_BOOT", "SBATCH_DISTRIBUTION", "SBATCH_EXCLUSIVE",
+  "SBATCH_GET_USER_ENV", "SBATCH_GPU_BIND", "SBATCH_GPU_FREQ",
+  "SBATCH_GPUS", "SBATCH_GPUS_PER_NODE", "SBATCH_GPUS_PER_TASK",
+  "SBATCH_GRES", "SBATCH_GRES_FLAGS", "SBATCH_HINT", "SLURM_HINT",
+  "SBATCH_IGNORE_PBS", "SBATCH_INPUT", "SBATCH_MEM_BIND",
+  "SBATCH_MEM_PER_CPU", "SBATCH_MEM_PER_GPU", "SBATCH_MEM_PER_NODE",
+  "SBATCH_NETWORK", "SBATCH_NO_KILL", "SBATCH_NO_REQUEUE",
+  "SBATCH_OPEN_MODE", "SBATCH_OVERCOMMIT", "SBATCH_PARTITION",
+  "SBATCH_POWER", "SBATCH_PROFILE", "SBATCH_QOS", "SBATCH_REQ_SWITCH",
+  "SBATCH_REQUEUE", "SBATCH_RESERVATION", "SBATCH_SEGMENT_SIZE",
+  "SBATCH_SIGNAL", "SBATCH_SPREAD_JOB", "SBATCH_THREAD_SPEC",
+  "SBATCH_THREADS_PER_CORE", "SBATCH_TRES_BIND", "SBATCH_TRES_PER_TASK",
+  "SBATCH_USE_MIN_NODES", "SBATCH_WAIT", "SBATCH_WAIT4SWITCH",
+  "SBATCH_WAIT_ALL_NODES", "SBATCH_WCKEY", "SLURM_CONF",
+  "SLURM_DEBUG_FLAGS", "SLURM_STEP_KILLED_MSG_NODE_ID"]
+
+proc applyEnvOptions(o: var Opts; diags: var seq[Diag]; warned: var seq[string]) =
+  for k, v in envPairs():
+    var opt = ""
+    for (ek, eopt) in envOptPairs:
+      if ek == k:
+        opt = eopt
+        break
+    if opt.len > 0:
+      applyOption(opt, v, o, diags, warned, cliOrigin())
+    elif k in envUnsupported:
+      diags.add plain(sevWarning, "sbatch",
+        "unsupported environment variable '" & k & "' ignored").note(
+        "it stands for an option vslurm does not implement")
+
 proc parseDirectives(path: string; o: var Opts; diags: var seq[Diag];
     warned: var seq[string]) =
   ## Apply #SBATCH directives from the top of the script until the first line
@@ -298,9 +349,11 @@ proc main() =
     emit(plain(sevError, "sbatch", o.script & ": No such file or directory"))
     quit(1)
 
-  # directives first, then the command line, which wins per real sbatch
+  # directives, then the environment, then the command line — each layer
+  # overrides the last, real sbatch's documented precedence
   if o.script.len > 0:
     parseDirectives(o.script, o, diags, warned)
+  applyEnvOptions(o, diags, warned)
   for c in scanned.calls:
     applyOption(c.opt, c.val, o, diags, warned, cliOrigin())
 
@@ -356,6 +409,7 @@ proc main() =
       diags.add d
     warned.setLen(mark)
     discard emitAll(diags)
+    diags.setLen(0)
     if tasks.len == 0: quit(1)
     arrayed = true
 

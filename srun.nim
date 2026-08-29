@@ -33,6 +33,56 @@ type
     ntasks: int
     cpus: int
 
+## Input environment variables per the srun man page: command line
+## always overrides the environment. srun's supported options are read;
+## documented-but-unsupported ones warn like unsupported options. Keys srun
+## itself doesn't document (PMI_*, etc.) are left alone entirely — they may
+## mean something to the job's own MPI stack, so they must survive into
+## the snapshot and must not warn.
+const envOptPairs = @[
+  ("SLURM_JOB_NAME", "job-name"),
+  ("SRUN_OUTPUT", "output"),
+  ("SRUN_ERROR", "error"),
+  ("SLURM_DEPENDENCY", "dependency"),
+  ("SLURM_TIMELIMIT", "time"),
+  ("SLURM_NTASKS", "ntasks"),
+  ("SLURM_NPROCS", "ntasks"),
+  ("SLURM_CPUS_PER_TASK", "cpus-per-task"),
+  ("SLURM_REMOTE_CWD", "chdir"),
+  ("SLURM_EXPORT_ENV", "export"),
+]
+
+## every other option-equivalent variable the srun man page documents.
+## SLURM_UMASK is honored by slurmctld at launch; SLURM_EXIT_ERROR is
+## silently ignored.
+const envUnsupported = ["SLURM_ACCOUNT", "SLURM_ACCTG_FREQ", "SLURM_BCAST",
+  "SLURM_BCAST_EXCLUDE", "SLURM_BURST_BUFFER", "SLURM_CLUSTERS",
+  "SLURM_COMPRESS", "SLURM_CONF", "SLURM_CONSTRAINT", "SLURM_CORE_SPEC",
+  "SLURM_CPU_BIND", "SLURM_CPU_FREQ_REQ", "SLURM_CPUS_PER_GPU",
+  "SLURM_DEBUG", "SLURM_DEBUG_FLAGS", "SLURM_DELAY_BOOT",
+  "SLURM_DISABLE_STATUS", "SLURM_DIST_PLANESIZE", "SLURM_DISTRIBUTION",
+  "SLURM_EPILOG", "SLURM_EXACT", "SLURM_EXCLUSIVE",
+  "SLURM_EXIT_IMMEDIATE", "SLURM_GPU_BIND", "SLURM_GPU_FREQ",
+  "SLURM_GPUS", "SLURM_GPUS_PER_NODE", "SLURM_GPUS_PER_TASK",
+  "SLURM_GRES", "SLURM_GRES_FLAGS", "SLURM_HINT", "SLURM_IMMEDIATE",
+  "SLURM_JOB_NUM_NODES", "SLURM_KILL_BAD_EXIT",
+  "SLURM_LABELIO", "SLURM_MEM_BIND", "SLURM_MEM_PER_CPU",
+  "SLURM_MEM_PER_GPU", "SLURM_MEM_PER_NODE", "SLURM_MPI_TYPE",
+  "SLURM_NETWORK", "SLURM_NNODES", "SLURM_NO_KILL",
+  "SLURM_NTASKS_PER_CORE", "SLURM_NTASKS_PER_GPU",
+  "SLURM_NTASKS_PER_NODE", "SLURM_NTASKS_PER_SOCKET", "SLURM_OOMKILLSTEP",
+  "SLURM_OPEN_MODE", "SLURM_OVERCOMMIT", "SLURM_OVERLAP",
+  "SLURM_PARTITION", "SLURM_POWER", "SLURM_PROFILE", "SLURM_PROLOG",
+  "SLURM_QOS", "SLURM_REQ_SWITCH", "SLURM_RESERVATION",
+  "SLURM_RESV_PORTS", "SLURM_SEND_LIBS", "SLURM_SIGNAL",
+  "SLURM_SPREAD_JOB", "SLURM_STEP_GRES", "SLURM_TASK_EPILOG",
+  "SLURM_TASK_PROLOG", "SLURM_THREADS", "SLURM_THREAD_SPEC",
+  "SLURM_THREADS_PER_CORE", "SLURM_TRES_BIND", "SLURM_TRES_PER_TASK",
+  "SLURM_UNBUFFEREDIO", "SLURM_USE_MIN_NODES", "SLURM_WAIT",
+  "SLURM_WCKEY", "SRUN_CONTAINER", "SRUN_CONTAINER_ID",
+  "SRUN_CONTAINER_TYPE", "SRUN_EXPORT_ENV", "SRUN_INPUT",
+  "SRUN_SEGMENT_SIZE"]
+
 proc applyOption(opt, val: string; o: var Opts; warned: var seq[string]) =
   case opt
   of "job-name": o.name = val
@@ -169,6 +219,29 @@ proc main() =
   var o = Opts(ntasks: 1, cpus: 1)
   var warned: seq[string] = @[]
   let scanned = scanArgs(commandLineParams(), shortMap, valueOpts, true)
+  # environment first, command line after it — the man page's rule that
+  # CLI settings override environment settings. Inside a running job
+  # (SLURM_JOB_ID set in our own env) srun ignores the name/dependency
+  # vars, per the man page's within-an-allocation exceptions — inheriting a
+  # parent's dependency could deadlock a `singleton` child against its own
+  # parent. SLURM_JOB_ID itself is silently dropped in that case too: there
+  # are no allocations to attach to, and warning on every nested srun
+  # would be noise.
+  let insideJob = getEnv("SLURM_JOB_ID").len > 0
+  for k, v in envPairs():
+    if insideJob and (k == "SLURM_JOB_NAME" or k == "SLURM_DEPENDENCY" or
+        k == "SLURM_JOB_ID"):
+      continue
+    var opt = ""
+    for (ek, eopt) in envOptPairs:
+      if ek == k:
+        opt = eopt
+        break
+    if opt.len > 0:
+      applyOption(opt, v, o, warned)
+    elif k in envUnsupported:
+      warnOnce("srun: warning: unsupported environment variable '" & k &
+        "' ignored", warned)
   for c in scanned.calls:
     applyOption(c.opt, c.val, o, warned)
   drainPlain(warned)

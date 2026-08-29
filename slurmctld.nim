@@ -58,12 +58,47 @@ proc buildEnv(j: Job; jobs: seq[Job]): StringTableRef =
   if j.dep.len > 0:
     result["SLURM_JOB_DEPENDENCY"] = j.dep
   if j.isArrayJob:
-    var count = 0
+    # Elements may have been purged already; MIN/MAX/STEP describe the
+    # array as it stands now, and STEP is only set when the surviving ids
+    # are evenly spaced (1,2,5 never gets one) — better absent than wrong.
+    var ids: seq[int] = @[]
     for k in jobs:
-      if k.isElementJob and k.arrayId == j.arrayId: inc count
+      if k.isElementJob and k.arrayId == j.arrayId: ids.add k.arrayTask
+    ids.sort(system.cmp)
     result["SLURM_ARRAY_JOB_ID"] = $j.arrayId
     result["SLURM_ARRAY_TASK_ID"] = $j.arrayTask
-    result["SLURM_ARRAY_TASK_COUNT"] = $count
+    result["SLURM_ARRAY_TASK_COUNT"] = $ids.len
+    if ids.len > 0:
+      result["SLURM_ARRAY_TASK_MIN"] = $ids[0]
+      result["SLURM_ARRAY_TASK_MAX"] = $ids[^1]
+    if ids.len > 1:
+      let step = ids[1] - ids[0]
+      var uniform = true
+      for i in 2 ..< ids.len:
+        if ids[i] - ids[i - 1] != step: uniform = false
+      if uniform: result["SLURM_ARRAY_TASK_STEP"] = $step
+  # single implicit node: node/host aliases all name this machine
+  let host = localHostname()
+  result["SLURM_JOBID"] = $j.id
+  result["SLURM_NPROCS"] = $j.ntasks
+  result["SLURM_JOB_NODELIST"] = host
+  result["SLURM_NODELIST"] = host
+  result["SLURM_JOB_NUM_NODES"] = "1"
+  result["SLURM_NNODES"] = "1"
+  result["SLURM_CPUS_ON_NODE"] = $(j.ntasks * j.cpus)
+  result["SLURMD_NODENAME"] = host
+  result["SLURM_SUBMIT_HOST"] = host
+  result["SLURM_TASKS_PER_NODE"] = $j.ntasks
+  # a batch script is one process — rank/node-local ids are all zero
+  result["SLURM_PROCID"] = "0"
+  result["SLURM_LOCALID"] = "0"
+  result["SLURM_NODEID"] = "0"
+  result["SLURM_GTIDS"] = "0"
+  if j.start.len > 0:
+    result["SLURM_JOB_START_TIME"] = $(parseDbTime(j.start).toUnix)
+    if j.hasMinutes and j.minutes > 0:
+      result["SLURM_JOB_END_TIME"] = $(parseDbTime(j.start).toUnix +
+        j.minutes * 60)
 
 proc runCommand(j: Job): string =
   ## The exact command slurmctld executes: either the submitted script (run
@@ -377,9 +412,11 @@ proc tick(procs: var Table[int, Process]; cpuCap: int;
         if run >= jobs[idx].arrayLimit: continue
       let need = jobs[idx].ntasks * jobs[idx].cpus
       if usedCpus + need <= cap:
+        # start is stamped before launch so the job's own environment can
+        # report SLURM_JOB_START_TIME/_END_TIME
+        jobs[idx].start = nowStr
         let pid = launch(jobs[idx], jobs, procs)
         jobs[idx].state = stRunning
-        jobs[idx].start = nowStr
         jobs[idx].pid = pid
         usedCpus += need
         log("launched " & describe(jobs[idx]) & " pid " & $pid &
